@@ -15,6 +15,7 @@
 
 ### Changed
 
+- Fork defaults: conversation snapshots stay for seven days instead of 24 h, and the progress-only synthetic retry is off unless `CURSOR_PROGRESS_CONTINUATION=1|true|on|yes`. `scripts/sync-upstream.sh` rebuilds `main` from the three topic branches plus these defaults.
 - `CURSOR_PROGRESS_CONTINUATION=0` disables the synthetic follow-up Run a tool-enabled turn opens when its whole answer was progress narration; the default stays as today. A built local checkout now resolves its own `dist/index.js` as the AI SDK entry instead of the published package (`CURSOR_OPENCODE2_USE_LOCAL_DIST=0` forces the published one). Progress guidance also drops a duplicated "progress update is not a final answer" line.
 - OpenCode variant picker keys are now the delta after the model name (`Extra High`, `No Thinking Low`, `High 500k`) instead of repeating the full Cursor display string; Fast and dedicated context-tier entries (`-500k`, `-1m`) also drop their redundant `Fast` / tier token, and variants are ordered No Thinking → Thinking then Low → Max.
 

@@ -16,6 +16,20 @@ process.env.TMP = runTmp
 process.env.TEMP = runTmp
 
 /**
+ * The fork keeps snapshots for seven days in production. Persistence tests use
+ * the 24-hour baseline constant to build expired records, so pin the runtime
+ * window here and exercise the fork default directly in shared.test.ts.
+ */
+process.env.CURSOR_PROVIDER_CACHE_TTL_MS = "86400000"
+
+/**
+ * The fork disables progress-only continuations in production. Run the suites
+ * with upstream's behavior so existing pump/checkpoint cases stay meaningful;
+ * progress-continuation.test.ts covers the fork default directly.
+ */
+process.env.CURSOR_PROGRESS_CONTINUATION = "1"
+
+/**
  * The native host cache root (`$XDG_CACHE_HOME/opencode`) lives in it too, so a
  * test that does not set its own cache root never writes to the operator's
  * real cache. Anything left there fails the run like any other leftover,

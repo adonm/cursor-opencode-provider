@@ -533,19 +533,22 @@ describe("bounded conversation maintenance", () => {
     }
   })
 
-  it("expires the same two-day-old snapshot at the default 24-hour retention", async () => {
+  it("expires the same two-day-old snapshot at the default retention", async () => {
     const cacheDir = await root()
     const twoDays = 2 * CONVERSATION_CACHE_TTL_MS
     await snapshot(cacheDir, gzipSync(protobufSnapshot(now - twoDays, "day-cold")))
     const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
-    delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    // Pin the runtime window to the 24 h baseline this file builds ages against,
+    // whatever the build's own default is.
+    process.env.CURSOR_PROVIDER_CACHE_TTL_MS = String(CONVERSATION_CACHE_TTL_MS)
     try {
       resetConversationPersistenceForTests()
       expect((await loadPersistedConversation(cacheDir, sessionKey, now)).status).toBe("expired")
       await waitForConversationMaintenanceForTests(cacheDir, now)
       await expect(stat(conversationCacheFilePath(cacheDir, sessionKey))).rejects.toMatchObject({ code: "ENOENT" })
     } finally {
-      if (previous !== undefined) process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
+      if (previous === undefined) delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+      else process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
     }
   })
 
@@ -573,10 +576,13 @@ describe("bounded conversation maintenance", () => {
     }
   })
 
-  it("falls back to 24 hours for an unusable CURSOR_PROVIDER_CACHE_TTL_MS", async () => {
+  it("falls back to the built-in retention for an unusable CURSOR_PROVIDER_CACHE_TTL_MS", async () => {
     const cacheDir = await root()
-    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - 2 * CONVERSATION_CACHE_TTL_MS)))
     const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    // The fallback is the build's own default, so age the record past whatever
+    // it is rather than past a fixed 24 h.
+    const fallbackDays = 9 * CONVERSATION_CACHE_TTL_MS
+    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - fallbackDays)))
     process.env.CURSOR_PROVIDER_CACHE_TTL_MS = "not-a-number"
     try {
       resetConversationPersistenceForTests()
