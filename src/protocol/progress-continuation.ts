@@ -76,6 +76,14 @@ export function isProgressOnlyAssistantText(text: string): boolean {
   return false
 }
 
+/** `CURSOR_PROGRESS_CONTINUATION=0|false|off|no` disables the synthetic retry. */
+function progressContinuationDisabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const value = env.CURSOR_PROGRESS_CONTINUATION?.trim().toLowerCase()
+  return value === "0" || value === "false" || value === "off" || value === "no"
+}
+
 export function shouldContinueProgressOnlyTurn(input: {
   allowTools: boolean
   advertisedToolCount: number
@@ -84,6 +92,7 @@ export function shouldContinueProgressOnlyTurn(input: {
   continuationAttempts: number
   pendingExecs: number
 }): boolean {
+  if (progressContinuationDisabled()) return false
   return (
     input.allowTools &&
     input.advertisedToolCount > 0 &&

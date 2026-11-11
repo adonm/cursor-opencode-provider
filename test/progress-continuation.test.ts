@@ -62,6 +62,23 @@ describe("shouldContinueProgressOnlyTurn", () => {
     expect(shouldContinueProgressOnlyTurn({ ...ready, continuationAttempts: 1 })).toBe(false)
     expect(shouldContinueProgressOnlyTurn({ ...ready, assistantText: "Reviewing this PR: LGTM" })).toBe(false)
   })
+
+  it("honors CURSOR_PROGRESS_CONTINUATION opt-out values", () => {
+    const previous = process.env.CURSOR_PROGRESS_CONTINUATION
+    try {
+      for (const value of ["0", "false", "FALSE", "off", "no", " 0 "]) {
+        process.env.CURSOR_PROGRESS_CONTINUATION = value
+        expect(shouldContinueProgressOnlyTurn(ready), value).toBe(false)
+      }
+      for (const value of ["1", "true", "on", "yes", ""]) {
+        process.env.CURSOR_PROGRESS_CONTINUATION = value
+        expect(shouldContinueProgressOnlyTurn(ready), value).toBe(true)
+      }
+    } finally {
+      if (previous === undefined) delete process.env.CURSOR_PROGRESS_CONTINUATION
+      else process.env.CURSOR_PROGRESS_CONTINUATION = previous
+    }
+  })
 })
 
 describe("progressOnlyContinuationPrompt", () => {
