@@ -16,7 +16,7 @@ import { resetCheckpointsForTests, setCheckpoint } from "../src/protocol/checkpo
 import { sessionManager } from "../src/session.js"
 import { sessionFixture } from "./session-fixture.js"
 import { settleRunSavesForTests } from "../src/language-model.js"
-import { applyCursorProviderInventory, CURSOR_AISDK_PACKAGE, modelConfigEntryToInfo } from "../src/opencode2/catalog.js"
+import { applyCursorProviderInventory, CURSOR_AISDK_PACKAGE, modelConfigEntryToInfo, resolveAiSdkPackageSpec } from "../src/opencode2/catalog.js"
 import {
   accessTokenFromCredential,
   applyCursorIntegration,
@@ -186,6 +186,32 @@ describe("opencode2 provider inventory", () => {
     expect(provider!.package.startsWith("aisdk:")).toBe(true)
     expect(provider!.integrationID).toBe("cursor")
     expect(provider!.activation).toBe("enabled")
+  })
+
+  test("resolves the AI SDK entry from the dev override, local build, or package", () => {
+    expect(resolveAiSdkPackageSpec("file:///work/dist/opencode2/catalog.js", {
+      CURSOR_OPENCODE2_DEV_ENTRY: "/tmp/cursor/dist/index.js",
+    })).toBe(`aisdk:${pathToFileURL("/tmp/cursor/dist/index.js").href}`)
+
+    const srcModule = pathToFileURL(resolve(import.meta.dir, "../src/opencode2/catalog.ts")).href
+    expect(resolveAiSdkPackageSpec(srcModule, {})).toBe("aisdk:cursor-opencode-provider")
+
+    const root = mkdtempSync(join(tmpdir(), "cursor-aisdk-"))
+    try {
+      mkdirSync(join(root, "opencode2"), { recursive: true })
+      writeFileSync(join(root, "index.js"), "export {}\n")
+      const builtModule = pathToFileURL(join(root, "opencode2", "catalog.js")).href
+      expect(resolveAiSdkPackageSpec(builtModule, {}))
+        .toBe(`aisdk:${pathToFileURL(join(root, "index.js")).href}`)
+      expect(resolveAiSdkPackageSpec(builtModule, { CURSOR_OPENCODE2_USE_LOCAL_DIST: "0" }))
+        .toBe("aisdk:cursor-opencode-provider")
+      expect(resolveAiSdkPackageSpec(
+        "file:///work/node_modules/cursor-opencode-provider/dist/opencode2/catalog.js",
+        {},
+      )).toBe("aisdk:cursor-opencode-provider")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   test("maps a model into the 2.0 shape", () => {

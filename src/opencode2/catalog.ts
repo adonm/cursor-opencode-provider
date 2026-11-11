@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs"
 import { pathToFileURL } from "node:url"
 import { CURSOR_PROVIDER_ID } from "../shared.js"
 import { CURSOR_WIRE_MODEL_ID_KEY, type ModelInfo } from "../models.js"
@@ -32,10 +33,33 @@ export const CURSOR_INTEGRATION_ID = CURSOR_PROVIDER_ID
  * specs and imports them directly, skipping `npm.add` — the only way to
  * exercise a local build through that fallback path short of publishing.
  * Unset in production; only meant for local `opencode2 run` testing.
+ *
+ * Without that override, a module running from a built checkout uses its
+ * sibling `dist/index.js` automatically. Running from `src/` has no sibling
+ * `index.js`, so tests and package installs keep the npm specifier. Set
+ * `CURSOR_OPENCODE2_USE_LOCAL_DIST=0` to force the published package.
  */
-export const CURSOR_AISDK_PACKAGE = process.env.CURSOR_OPENCODE2_DEV_ENTRY
-  ? `aisdk:${pathToFileURL(process.env.CURSOR_OPENCODE2_DEV_ENTRY).href}`
-  : "aisdk:cursor-opencode-provider"
+export function resolveAiSdkPackageSpec(
+  moduleUrl: string = import.meta.url,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  if (env.CURSOR_OPENCODE2_DEV_ENTRY) {
+    return `aisdk:${pathToFileURL(env.CURSOR_OPENCODE2_DEV_ENTRY).href}`
+  }
+  if (env.CURSOR_OPENCODE2_USE_LOCAL_DIST !== "0" && !moduleUrl.includes("/node_modules/")) {
+    try {
+      const localEntry = new URL("../index.js", moduleUrl)
+      if (localEntry.protocol === "file:" && existsSync(localEntry)) {
+        return `aisdk:${localEntry.href}`
+      }
+    } catch {
+      // A non-URL module location cannot host a sibling build; use the package.
+    }
+  }
+  return "aisdk:cursor-opencode-provider"
+}
+
+export const CURSOR_AISDK_PACKAGE = resolveAiSdkPackageSpec()
 
 /**
  * Plain-object `Model.Info` equivalent used by `ctx.provider.transform`.
