@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test"
+import { afterEach, beforeEach, describe, expect, it } from "bun:test"
 import {
   isProgressOnlyAssistantText,
   progressOnlyContinuationPrompt,
@@ -46,6 +46,13 @@ describe("shouldContinueProgressOnlyTurn", () => {
     continuationAttempts: 0,
     pendingExecs: 0,
   }
+  const previous = process.env.CURSOR_PROGRESS_CONTINUATION
+  // The fork disables this retry by default; most cases below exercise opt-in.
+  beforeEach(() => { process.env.CURSOR_PROGRESS_CONTINUATION = "1" })
+  afterEach(() => {
+    if (previous === undefined) delete process.env.CURSOR_PROGRESS_CONTINUATION
+    else process.env.CURSOR_PROGRESS_CONTINUATION = previous
+  })
 
   it("continues a tool-enabled progress fragment once", () => {
     expect(shouldContinueProgressOnlyTurn(ready)).toBe(true)
@@ -63,20 +70,19 @@ describe("shouldContinueProgressOnlyTurn", () => {
     expect(shouldContinueProgressOnlyTurn({ ...ready, assistantText: "Reviewing this PR: LGTM" })).toBe(false)
   })
 
-  it("honors CURSOR_PROGRESS_CONTINUATION opt-out values", () => {
-    const previous = process.env.CURSOR_PROGRESS_CONTINUATION
-    try {
-      for (const value of ["0", "false", "FALSE", "off", "no", " 0 "]) {
-        process.env.CURSOR_PROGRESS_CONTINUATION = value
-        expect(shouldContinueProgressOnlyTurn(ready), value).toBe(false)
-      }
-      for (const value of ["1", "true", "on", "yes", ""]) {
-        process.env.CURSOR_PROGRESS_CONTINUATION = value
-        expect(shouldContinueProgressOnlyTurn(ready), value).toBe(true)
-      }
-    } finally {
-      if (previous === undefined) delete process.env.CURSOR_PROGRESS_CONTINUATION
-      else process.env.CURSOR_PROGRESS_CONTINUATION = previous
+  it("is off by default in the fork", () => {
+    delete process.env.CURSOR_PROGRESS_CONTINUATION
+    expect(shouldContinueProgressOnlyTurn(ready)).toBe(false)
+  })
+
+  it("honors CURSOR_PROGRESS_CONTINUATION opt-in and opt-out values", () => {
+    for (const value of ["0", "false", "FALSE", "off", "no", " 0 ", ""]) {
+      process.env.CURSOR_PROGRESS_CONTINUATION = value
+      expect(shouldContinueProgressOnlyTurn(ready), value).toBe(false)
+    }
+    for (const value of ["1", "true", "TRUE", "on", "yes", " 1 "]) {
+      process.env.CURSOR_PROGRESS_CONTINUATION = value
+      expect(shouldContinueProgressOnlyTurn(ready), value).toBe(true)
     }
   })
 })
