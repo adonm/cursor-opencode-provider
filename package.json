@@ -74,7 +74,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "./scripts/build-atomic.sh",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "bun test",
     "test:coverage": "bun test --coverage --coverage-reporter=lcov && bun scripts/strip-copied-coverage.ts",

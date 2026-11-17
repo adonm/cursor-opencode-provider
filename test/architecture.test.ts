@@ -152,6 +152,24 @@ describe("provider / compatibility-layer architecture", () => {
     )).toEqual([])
   })
 
+  test("built output is not older than its sources", () => {
+    const entry = path.join(ROOT, "dist", "index.js")
+    if (!existsSync(entry)) return
+    // A build that predates a source edit silently publishes stale JavaScript to
+    // the package and to `bun test`, so compare the newest input with the entry.
+    let newest = 0
+    let newestFile = ""
+    for (const file of SOURCE_FILES) {
+      const { mtimeMs } = statSync(file)
+      if (mtimeMs > newest) { newest = mtimeMs; newestFile = relative(file) }
+    }
+    const builtAt = statSync(entry).mtimeMs
+    expect(
+      builtAt < newest,
+      `dist/ is older than src/; run bun run build (${newestFile} is newer than dist/index.js)`,
+    ).toBe(false)
+  })
+
   test("static import checks inspect complete declarations and distinguish type imports", () => {
     const text = `import {\n  tool\n} from "@opencode-ai/plugin"\nimport type { Hooks } from "@opencode-ai/plugin"`
     expect(staticImports(text, /^@opencode-ai\/plugin$/, true)).toEqual(["@opencode-ai/plugin"])
