@@ -2096,7 +2096,42 @@ function iteratorFrom(payloads: Uint8Array[]): AsyncIterator<Frame> {
 }
 
 describe("progress-only continuation pump", () => {
-  it("reopens once for a progress fragment and still finishes the original turn later", async () => {
+  /**
+   * The fork ships this gate off. These cases cover the enabled behavior, so
+   * each one opts in and restores the unset default for the next test.
+   */
+  async function continuationEnabled<T>(run: () => Promise<T>): Promise<T> {
+    process.env.CURSOR_PROGRESS_CONTINUATION = "1"
+    try {
+      return await run()
+    } finally {
+      delete process.env.CURSOR_PROGRESS_CONTINUATION
+    }
+  }
+
+  it("does not reopen a progress fragment with the fork default", async () => {
+    const writes: Uint8Array[] = []
+    const session = fakeSession(
+      [textDeltaPayload("Checking the workspace"), turnEndedPayload()],
+      writes,
+    )
+    session.resumeCheckpoint = Uint8Array.of(1, 2, 3)
+    let reopenCalls = 0
+    session.reopenWithUserMessage = async () => {
+      reopenCalls++
+    }
+    const controller = {
+      enqueue() {},
+      error() {},
+    } as unknown as ReadableStreamDefaultController<any>
+
+    expect(process.env.CURSOR_PROGRESS_CONTINUATION).toBeUndefined()
+    await pump(session, controller, { textId: "text", reasoningId: "reasoning" }, new AbortController().signal)
+
+    expect(reopenCalls).toBe(0)
+  })
+
+  it("reopens once for a progress fragment and still finishes the original turn later", () => continuationEnabled(async () => {
     const writes: Uint8Array[] = []
     const parts: any[] = []
     const session = fakeSession(
@@ -2128,9 +2163,9 @@ describe("progress-only continuation pump", () => {
     expect(reopenSignal).toBe(abort.signal)
     expect(parts.some((p) => p.type === "finish" && p.finishReason?.unified === "stop")).toBe(true)
     expect(session.closed).toBe(true)
-  })
+  }))
 
-  it("revokes the earlier checkpoint when a progress follow-up opens but drops", async () => {
+  it("revokes the earlier checkpoint when a progress follow-up opens but drops", () => continuationEnabled(async () => {
     const session = fakeSession([textDeltaPayload("Checking the workspace"), turnEndedPayload()], [])
     session.resumeCheckpoint = Uint8Array.of(1, 2, 3)
     session.reopenWithUserMessage = async () => { session.frames = iteratorFrom([]) }
@@ -2142,9 +2177,9 @@ describe("progress-only continuation pump", () => {
       .rejects.toMatchObject({ transient: true, replaySafe: false })
     expect(session.resumeCheckpoint).toBeUndefined()
     expect(session.checkpointRevoked).toBe(true)
-  })
+  }))
 
-  it("does not reopen a complete answer that starts with a progress verb", async () => {
+  it("does not reopen a complete answer that starts with a progress verb", () => continuationEnabled(async () => {
     const writes: Uint8Array[] = []
     const session = fakeSession(
       [textDeltaPayload("Reviewing this PR: LGTM"), turnEndedPayload()],
@@ -2163,7 +2198,7 @@ describe("progress-only continuation pump", () => {
     await pump(session, controller, { textId: "text", reasoningId: "reasoning" })
 
     expect(reopenCalls).toBe(0)
-  })
+  }))
 
   it("does not reopen when allowTools is false", async () => {
     const writes: Uint8Array[] = []
@@ -2187,7 +2222,7 @@ describe("progress-only continuation pump", () => {
     expect(reopenCalls).toBe(0)
   })
 
-  it("finishes the original turn_ended when continuation reopen fails", async () => {
+  it("finishes the original turn_ended when continuation reopen fails", async () => continuationEnabled(async () => {
     const writes: Uint8Array[] = []
     const parts: any[] = []
     const session = fakeSession(
@@ -2211,5 +2246,5 @@ describe("progress-only continuation pump", () => {
 
     expect(parts.some((p) => p.type === "finish" && p.finishReason?.unified === "stop")).toBe(true)
     expect(session.closed).toBe(true)
-  })
+  }))
 })

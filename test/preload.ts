@@ -48,7 +48,7 @@ delete process.env.OPENCODE_AUTH_CONTENT
 process.env.CURSOR_CLIENT_VERSION = "cli-test"
 
 /**
- * Retention tests assert the default age policy unless they set an override
+ * Retention tests assert this fork's default window unless they set an override
  * themselves. An operator's longer window must not disable their expiry and
  * quarantine branches, including the barriers those tests wait for.
  */

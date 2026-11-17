@@ -25,11 +25,17 @@ import {
   waitForConversationMaintenanceForTests,
 } from "../src/protocol/conversation-persistence.js"
 import { encodeMessage } from "../src/protocol/messages.js"
-import { CONVERSATION_CACHE_SCHEMA_VERSION, CONVERSATION_CACHE_TTL_MS } from "../src/shared.js"
+import { CONVERSATION_CACHE_SCHEMA_VERSION, CONVERSATION_CACHE_TTL_MS, resolveConversationCacheTtlMs } from "../src/shared.js"
 
 const roots: string[] = []
 const sessionKey = "ses_maintenance"
 const now = 1_900_000_000_000
+/**
+ * Snapshot age policy under test. `test/preload.ts` clears the override, so this
+ * is the fork default (seven days); the abandoned `.tmp` sweep keeps
+ * `CONVERSATION_CACHE_TTL_MS`.
+ */
+const ttl = resolveConversationCacheTtlMs()
 
 async function root(): Promise<string> {
   const value = await mkdtemp(path.join(os.tmpdir(), "cursor-maintenance-"))
@@ -113,7 +119,7 @@ describe("bounded conversation maintenance", () => {
     const cacheDir = await root()
     const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now, "large", Buffer.alloc(4 * 1024 * 1024))))
     const expired = path.join(conversationCacheDirectoryPath(cacheDir), "expired.pb.gz")
-    await writeFile(expired, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1)))
+    await writeFile(expired, gzipSync(protobufSnapshot(now - ttl - 1)))
     let decodes = 0
     setConversationPersistenceHookForTests((phase) => { if (phase === "full-decode") decodes++ })
     await waitForConversationMaintenanceForTests(cacheDir, now)
@@ -126,12 +132,12 @@ describe("bounded conversation maintenance", () => {
 
   it("uses persisted age when filesystem times disagree, including the exact TTL boundary", async () => {
     const cacheDir = await root()
-    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS)))
+    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - ttl)))
     await utimes(filePath, 0, 0)
     await waitForConversationMaintenanceForTests(cacheDir, now)
     expect((await stat(filePath)).isFile()).toBe(true)
     resetConversationPersistenceForTests()
-    await snapshot(cacheDir, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1)))
+    await snapshot(cacheDir, gzipSync(protobufSnapshot(now - ttl - 1)))
     await utimes(filePath, new Date(now), new Date(now))
     await waitForConversationMaintenanceForTests(cacheDir, now)
     expect((await loadPersistedConversation(cacheDir, sessionKey, now)).status).toBe("expired")
@@ -139,7 +145,7 @@ describe("bounded conversation maintenance", () => {
 
   it("rejects expiry on demand before decompressing any body", async () => {
     const cacheDir = await root()
-    await snapshot(cacheDir, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1,
+    await snapshot(cacheDir, gzipSync(protobufSnapshot(now - ttl - 1,
       "expired", Buffer.alloc(16 * 1024 * 1024))))
     let decodes = 0
     setConversationPersistenceHookForTests((phase) => { if (phase === "full-decode") decodes++ })
@@ -205,7 +211,7 @@ describe("bounded conversation maintenance", () => {
 
   it("preserves a fresh atomic replacement made before quarantine", async () => {
     const cacheDir = await root()
-    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1)))
+    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - ttl - 1)))
     setConversationPersistenceHookForTests(async (phase) => {
       if (phase === "before-quarantine") await publishFromChild(filePath, gzipSync(protobufSnapshot(now, "replacement")))
     })
@@ -216,7 +222,7 @@ describe("bounded conversation maintenance", () => {
 
   it("lets another process restore a fresh replacement while it is quarantined", async () => {
     const cacheDir = await root()
-    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1)))
+    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - ttl - 1)))
     const entered = deferred(), release = deferred()
     setConversationPersistenceHookForTests(async (phase) => {
       if (phase === "before-quarantine") await publishFromChild(filePath, gzipSync(protobufSnapshot(now, "moved-fresh")))
@@ -240,7 +246,7 @@ describe("bounded conversation maintenance", () => {
 
   it("keeps a writer's live file when it publishes after quarantine", async () => {
     const cacheDir = await root()
-    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1)))
+    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - ttl - 1)))
     setConversationPersistenceHookForTests(async (phase) => {
       if (phase === "after-quarantine") await publishFromChild(filePath, gzipSync(protobufSnapshot(now, "live-writer")))
     })
@@ -255,7 +261,7 @@ describe("bounded conversation maintenance", () => {
     const directory = path.join(conversationCacheDirectoryPath(cacheDir), ".gc", path.basename(filePath))
     await mkdir(directory, { recursive: true })
     await writeFile(path.join(directory, "fresh.snapshot"), gzipSync(protobufSnapshot(now, "crash-fresh")))
-    await writeFile(path.join(directory, "expired.snapshot"), gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1)))
+    await writeFile(path.join(directory, "expired.snapshot"), gzipSync(protobufSnapshot(now - ttl - 1)))
     await waitForConversationMaintenanceForTests(cacheDir, now)
     expect((await getPersistedConversation(cacheDir, sessionKey, now))?.conversationId).toBe("crash-fresh")
     await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" })
@@ -371,7 +377,7 @@ describe("bounded conversation maintenance", () => {
 
   it("tolerates a second collector finishing an already moved candidate", async () => {
     const cacheDir = await root()
-    await snapshot(cacheDir, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1)))
+    await snapshot(cacheDir, gzipSync(protobufSnapshot(now - ttl - 1)))
     const module = new URL("../src/protocol/conversation-persistence.ts", import.meta.url).href
     setConversationPersistenceHookForTests(async (phase) => {
       if (phase === "after-quarantine") await child(`
@@ -420,7 +426,7 @@ describe("bounded conversation maintenance", () => {
     await persistConversation(cacheDir, {
       sessionKey, conversationId: "idle", blobs: [], requestContext: { rules_info_complete: true },
     }, now)
-    const later = now + CONVERSATION_CACHE_TTL_MS + 1
+    const later = now + ttl + 1
     expect(await loadPersistedConversation(cacheDir, sessionKey, later)).toEqual({ status: "expired" })
     expect(await getPersistedTurnProvenance(cacheDir, sessionKey, later)).toBeUndefined()
   })
@@ -444,13 +450,13 @@ describe("bounded conversation maintenance", () => {
     expect((await getPersistedConversation(cacheDir, sessionKey, now))?.conversationId).toBe("conversation-current")
     await waitForConversationMaintenanceForTests(cacheDir, now)
     expect((await stat(filePath)).isFile()).toBe(true)
-    await waitForConversationMaintenanceForTests(cacheDir, now + CONVERSATION_CACHE_TTL_MS + 1)
+    await waitForConversationMaintenanceForTests(cacheDir, now + ttl + 1)
     await expect(stat(filePath)).rejects.toMatchObject({ code: "ENOENT" })
   })
 
   it("retries quarantine when another collector removes the emptied directory", async () => {
     const cacheDir = await root()
-    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1)))
+    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - ttl - 1)))
     const directory = path.join(conversationCacheDirectoryPath(cacheDir), ".gc", path.basename(filePath))
     setConversationPersistenceHookForTests(async (phase) => {
       if (phase === "before-quarantine") await rm(directory, { recursive: true })
@@ -463,7 +469,7 @@ describe("bounded conversation maintenance", () => {
   it("isolates one failing entry from the rest of the pass", async () => {
     const cacheDir = await root()
     const directory = conversationCacheDirectoryPath(cacheDir)
-    const expired = gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1))
+    const expired = gzipSync(protobufSnapshot(now - ttl - 1))
     await writeFile(path.join(directory, "a.pb.gz"), expired)
     await writeFile(path.join(directory, "b.pb.gz"), expired)
     let failed: string | undefined
@@ -487,7 +493,7 @@ describe("bounded conversation maintenance", () => {
       return gzipSync(bytes)
     }
     const expiredPath = path.join(directory, "previous-expired.pb.gz")
-    await writeFile(expiredPath, previous(now - CONVERSATION_CACHE_TTL_MS - 1))
+    await writeFile(expiredPath, previous(now - ttl - 1))
     const freshPath = await snapshot(cacheDir, previous(now))
     let decodes = 0
     setConversationPersistenceHookForTests((phase) => { if (phase === "full-decode") decodes++ })
@@ -514,42 +520,37 @@ describe("bounded conversation maintenance", () => {
     expect((await stat(partialTemp)).isFile()).toBe(true)
   })
 
-  it("keeps a two-day-old snapshot warm when CURSOR_PROVIDER_CACHE_TTL_MS is seven days", async () => {
+  it("keeps a two-day-old snapshot warm under the fork's default seven-day window", async () => {
     const cacheDir = await root()
-    const twoDays = 2 * CONVERSATION_CACHE_TTL_MS
+    const twoDays = 2 * 86_400_000
     const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - twoDays, "week-warm")))
-    const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
-    process.env.CURSOR_PROVIDER_CACHE_TTL_MS = "604800000"
-    try {
-      await waitForConversationMaintenanceForTests(cacheDir, now)
-      // Maintenance must not collect it, and a warm load must still restore it.
-      expect((await stat(filePath)).isFile()).toBe(true)
-      const loaded = await loadPersistedConversation(cacheDir, sessionKey, now)
-      expect(loaded.status).toBe("restored")
-      expect(loaded.value?.conversationId).toBe("week-warm")
-    } finally {
-      if (previous === undefined) delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
-      else process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
-    }
+    expect(process.env.CURSOR_PROVIDER_CACHE_TTL_MS).toBeUndefined()
+    await waitForConversationMaintenanceForTests(cacheDir, now)
+    // Maintenance must not collect it, and a warm load must still restore it.
+    expect((await stat(filePath)).isFile()).toBe(true)
+    const loaded = await loadPersistedConversation(cacheDir, sessionKey, now)
+    expect(loaded.status).toBe("restored")
+    expect(loaded.value?.conversationId).toBe("week-warm")
   })
 
-  it("expires the same two-day-old snapshot at the default 24-hour retention", async () => {
+  it("expires a two-day-old snapshot when the override narrows the window to 24 hours", async () => {
     const cacheDir = await root()
-    const twoDays = 2 * CONVERSATION_CACHE_TTL_MS
+    const twoDays = 2 * 86_400_000
     await snapshot(cacheDir, gzipSync(protobufSnapshot(now - twoDays, "day-cold")))
     const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
-    delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    process.env.CURSOR_PROVIDER_CACHE_TTL_MS = String(CONVERSATION_CACHE_TTL_MS)
     try {
       resetConversationPersistenceForTests()
       expect((await loadPersistedConversation(cacheDir, sessionKey, now)).status).toBe("expired")
       await waitForConversationMaintenanceForTests(cacheDir, now)
       await expect(stat(conversationCacheFilePath(cacheDir, sessionKey))).rejects.toMatchObject({ code: "ENOENT" })
     } finally {
-      if (previous !== undefined) process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
+      if (previous === undefined) delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+      else process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
     }
   })
 
-  it("still collects an abandoned writer temp at 24 hours under a seven-day retention", async () => {
+  it("still collects an abandoned writer temp at 24 hours under the seven-day default", async () => {
     const cacheDir = await root()
     const directory = conversationCacheDirectoryPath(cacheDir)
     const base = path.basename(conversationCacheFilePath(cacheDir, sessionKey))
@@ -557,32 +558,27 @@ describe("bounded conversation maintenance", () => {
     const twoDayTemp = path.join(directory, `.${base}.2.twoday.tmp`)
     await writeFile(expiredTemp, gzipSync(protobufSnapshot(now - CONVERSATION_CACHE_TTL_MS - 1)))
     await writeFile(twoDayTemp, gzipSync(protobufSnapshot(now - 2 * CONVERSATION_CACHE_TTL_MS)))
-    const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
-    process.env.CURSOR_PROVIDER_CACHE_TTL_MS = "604800000"
-    try {
-      resetConversationPersistenceForTests()
-      await waitForConversationMaintenanceForTests(cacheDir, now)
-      // Temp cleanup stays on the fixed window, so a longer retention cannot
-      // strand an interrupted write on disk.
-      for (const temp of [expiredTemp, twoDayTemp]) {
-        await expect(stat(temp)).rejects.toMatchObject({ code: "ENOENT" })
-      }
-    } finally {
-      if (previous === undefined) delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
-      else process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
+    expect(process.env.CURSOR_PROVIDER_CACHE_TTL_MS).toBeUndefined()
+    resetConversationPersistenceForTests()
+    await waitForConversationMaintenanceForTests(cacheDir, now)
+    // Temp cleanup stays on the fixed window, so a longer retention cannot
+    // strand an interrupted write on disk.
+    for (const temp of [expiredTemp, twoDayTemp]) {
+      await expect(stat(temp)).rejects.toMatchObject({ code: "ENOENT" })
     }
   })
 
-  it("falls back to 24 hours for an unusable CURSOR_PROVIDER_CACHE_TTL_MS", async () => {
+  it("falls back to the seven-day default for an unusable CURSOR_PROVIDER_CACHE_TTL_MS", async () => {
     const cacheDir = await root()
-    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - 2 * CONVERSATION_CACHE_TTL_MS)))
+    const filePath = await snapshot(cacheDir, gzipSync(protobufSnapshot(now - 2 * 86_400_000)))
     const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
     process.env.CURSOR_PROVIDER_CACHE_TTL_MS = "not-a-number"
     try {
       resetConversationPersistenceForTests()
-      expect((await loadPersistedConversation(cacheDir, sessionKey, now)).status).toBe("expired")
+      // Two days is inside the fallback window, so the snapshot stays warm.
+      expect((await loadPersistedConversation(cacheDir, sessionKey, now)).status).toBe("restored")
       await waitForConversationMaintenanceForTests(cacheDir, now)
-      await expect(stat(filePath)).rejects.toMatchObject({ code: "ENOENT" })
+      expect((await stat(filePath)).isFile()).toBe(true)
     } finally {
       if (previous === undefined) delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
       else process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous

@@ -46,7 +46,7 @@ import {
   runHistoryImages,
   snapshotHeldHistoryImagesForTests,
 } from "../src/protocol/sent-history-images.js"
-import { CONVERSATION_CACHE_TTL_MS } from "../src/shared.js"
+import { resolveConversationCacheTtlMs } from "../src/shared.js"
 import { recordSessionEditsGuidance, sessionEditsGuidance } from "../src/protocol/session-edits.js"
 import { encodeMessage } from "../src/protocol/messages.js"
 import {
@@ -59,6 +59,9 @@ import type { CursorSession, Frame } from "../src/session.js"
 import { sessionFixture } from "./session-fixture.js"
 
 const roots: string[] = []
+
+/** Snapshot age policy under test; `test/preload.ts` clears the override, so this is the fork default. */
+const ttl = resolveConversationCacheTtlMs()
 
 async function cacheRoot(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), "cursor-conversation-cache-"))
@@ -553,7 +556,7 @@ describe("conversation restart persistence", () => {
     })
   })
 
-  it("prunes records older than 24 hours in maintenance but keeps the exact boundary", async () => {
+  it("prunes records past the retention window in maintenance but keeps the exact boundary", async () => {
     const staleRoot = await cacheRoot()
     const boundaryRoot = await cacheRoot()
     const writtenAt = 1_900_000_000_000
@@ -567,19 +570,19 @@ describe("conversation restart persistence", () => {
     await persistConversation(boundaryRoot, value, writtenAt)
 
     clearMemory()
-    await waitForConversationMaintenanceForTests(staleRoot, writtenAt + CONVERSATION_CACHE_TTL_MS + 1)
+    await waitForConversationMaintenanceForTests(staleRoot, writtenAt + ttl + 1)
     expect((await loadPersistedConversation(staleRoot, value.sessionKey)).status).toBe("expired")
     await expect(stat(conversationCacheFilePath(staleRoot, value.sessionKey)))
       .rejects.toMatchObject({ code: "ENOENT" })
 
     clearMemory()
-    await waitForConversationMaintenanceForTests(boundaryRoot, writtenAt + CONVERSATION_CACHE_TTL_MS)
+    await waitForConversationMaintenanceForTests(boundaryRoot, writtenAt + ttl)
     expect((await getPersistedConversation(boundaryRoot, value.sessionKey))?.conversationId)
       .toBe(value.conversationId)
     expect((await stat(conversationCacheFilePath(boundaryRoot, value.sessionKey))).isFile()).toBe(true)
   })
 
-  it("keeps a snapshot warm past 24 hours when CURSOR_PROVIDER_CACHE_TTL_MS is seven days", async () => {
+  it("keeps a two-day-old snapshot warm under the fork's default window", async () => {
     const root = await cacheRoot()
     const writtenAt = 1_900_000_000_000
     const value = {
@@ -588,22 +591,17 @@ describe("conversation restart persistence", () => {
       blobs: [],
       requestContext: { rules_info_complete: true },
     }
-    const previous = process.env.CURSOR_PROVIDER_CACHE_TTL_MS
-    process.env.CURSOR_PROVIDER_CACHE_TTL_MS = "604800000"
-    try {
-      await persistConversation(root, value, writtenAt)
-      clearMemory()
-      // Two days later is past the default window but inside the configured one.
-      const readAt = writtenAt + 2 * CONVERSATION_CACHE_TTL_MS
-      expect(await getPersistedConversation(root, value.sessionKey, readAt)).toMatchObject({
-        conversationId: value.conversationId,
-      })
-      await waitForConversationMaintenanceForTests(root, readAt)
-      expect((await stat(conversationCacheFilePath(root, value.sessionKey))).isFile()).toBe(true)
-    } finally {
-      if (previous === undefined) delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
-      else process.env.CURSOR_PROVIDER_CACHE_TTL_MS = previous
-    }
+    expect(process.env.CURSOR_PROVIDER_CACHE_TTL_MS).toBeUndefined()
+    await persistConversation(root, value, writtenAt)
+    clearMemory()
+    // Two days later is past the upstream 24 h window but inside the fork's.
+    const readAt = writtenAt + 2 * 86_400_000
+    expect(await loadPersistedConversation(root, value.sessionKey, readAt)).toMatchObject({
+      status: "restored",
+      value: { conversationId: value.conversationId },
+    })
+    await waitForConversationMaintenanceForTests(root, readAt)
+    expect((await stat(conversationCacheFilePath(root, value.sessionKey))).isFile()).toBe(true)
   })
 
   it("serializes overlapping updates without losing either session", async () => {
