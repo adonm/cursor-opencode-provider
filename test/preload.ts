@@ -54,6 +54,12 @@ process.env.CURSOR_CLIENT_VERSION = "cli-test"
  */
 delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
 
+/**
+ * Same for the progress-continuation gate: an operator's opt-out must not silence
+ * the continuation cases, and a test that sets it must not leak it onward.
+ */
+delete process.env.CURSOR_PROGRESS_CONTINUATION
+
 /** Nothing a test does reaches Cursor or any other host (`test/network-guard.ts`). */
 installNetworkGuard()
 
@@ -94,6 +100,10 @@ afterEach(() => {
   if (process.env.CURSOR_PROVIDER_CACHE_TTL_MS !== undefined) {
     delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
     failures.push("left CURSOR_PROVIDER_CACHE_TTL_MS changed; restore what the test sets")
+  }
+  if (process.env.CURSOR_PROGRESS_CONTINUATION !== undefined) {
+    delete process.env.CURSOR_PROGRESS_CONTINUATION
+    failures.push("left CURSOR_PROGRESS_CONTINUATION changed; restore what the test sets")
   }
   const failed = failures.filter((failure) => failure !== undefined)
   if (failed.length > 0) throw new Error(`This test ${failed.join(", and ")}.`)

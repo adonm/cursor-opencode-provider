@@ -76,6 +76,15 @@ export function isProgressOnlyAssistantText(text: string): boolean {
   return false
 }
 
+/**
+ * `CURSOR_PROGRESS_CONTINUATION=0|false|off|no` disables the synthetic retry.
+ * Upstream callers default to on, so an unset variable keeps today's behavior.
+ */
+export function isProgressContinuationEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env.CURSOR_PROGRESS_CONTINUATION?.trim().toLowerCase()
+  return !(value === "0" || value === "false" || value === "off" || value === "no")
+}
+
 export function shouldContinueProgressOnlyTurn(input: {
   allowTools: boolean
   advertisedToolCount: number
@@ -83,7 +92,10 @@ export function shouldContinueProgressOnlyTurn(input: {
   emittedHostTools: number
   continuationAttempts: number
   pendingExecs: number
+  /** Omitted is on, so a pure unit test need not own the environment. */
+  continuationEnabled?: boolean
 }): boolean {
+  if (input.continuationEnabled === false) return false
   return (
     input.allowTools &&
     input.advertisedToolCount > 0 &&

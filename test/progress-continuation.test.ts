@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test"
 import {
+  isProgressContinuationEnabled,
   isProgressOnlyAssistantText,
   progressOnlyContinuationPrompt,
   shouldContinueProgressOnlyTurn,
@@ -61,6 +62,35 @@ describe("shouldContinueProgressOnlyTurn", () => {
     expect(shouldContinueProgressOnlyTurn({ ...ready, emittedHostTools: 1 })).toBe(false)
     expect(shouldContinueProgressOnlyTurn({ ...ready, continuationAttempts: 1 })).toBe(false)
     expect(shouldContinueProgressOnlyTurn({ ...ready, assistantText: "Reviewing this PR: LGTM" })).toBe(false)
+  })
+
+  it("stops immediately when the caller passes continuationEnabled: false", () => {
+    expect(shouldContinueProgressOnlyTurn({ ...ready, continuationEnabled: false })).toBe(false)
+    expect(shouldContinueProgressOnlyTurn({ ...ready, continuationEnabled: true })).toBe(true)
+  })
+
+  it("treats an omitted continuationEnabled as enabled", () => {
+    expect(shouldContinueProgressOnlyTurn(ready)).toBe(true)
+  })
+})
+
+describe("isProgressContinuationEnabled", () => {
+  it("defaults to enabled when the variable is unset or empty", () => {
+    expect(isProgressContinuationEnabled({})).toBe(true)
+    expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: "" })).toBe(true)
+    expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: "   " })).toBe(true)
+  })
+
+  it("is disabled for explicit off values regardless of case or padding", () => {
+    for (const value of ["0", "false", "FALSE", "False", "off", "OFF", "no", "NO", " 0 ", " off "]) {
+      expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: value }), value).toBe(false)
+    }
+  })
+
+  it("stays enabled for any other value", () => {
+    for (const value of ["1", "true", "on", "yes", "enabled", "2"]) {
+      expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: value }), value).toBe(true)
+    }
   })
 })
 
