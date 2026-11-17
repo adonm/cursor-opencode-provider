@@ -75,21 +75,27 @@ describe("shouldContinueProgressOnlyTurn", () => {
 })
 
 describe("isProgressContinuationEnabled", () => {
-  it("defaults to enabled when the variable is unset or empty", () => {
-    expect(isProgressContinuationEnabled({})).toBe(true)
-    expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: "" })).toBe(true)
-    expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: "   " })).toBe(true)
+  it("is off when the variable is unset or empty (fork default)", () => {
+    expect(isProgressContinuationEnabled({})).toBe(false)
+    expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: "" })).toBe(false)
+    expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: "   " })).toBe(false)
   })
 
-  it("is disabled for explicit off values regardless of case or padding", () => {
+  it("is off for explicit off values regardless of case or padding", () => {
     for (const value of ["0", "false", "FALSE", "False", "off", "OFF", "no", "NO", " 0 ", " off "]) {
       expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: value }), value).toBe(false)
     }
   })
 
-  it("stays enabled for any other value", () => {
-    for (const value of ["1", "true", "on", "yes", "enabled", "2"]) {
+  it("is on only for the explicit opt-in values", () => {
+    for (const value of ["1", "true", "TRUE", "on", "yes", " 1 ", " YES "]) {
       expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: value }), value).toBe(true)
+    }
+  })
+
+  it("is off for any other value", () => {
+    for (const value of ["enabled", "2", "y", "t"]) {
+      expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: value }), value).toBe(false)
     }
   })
 })

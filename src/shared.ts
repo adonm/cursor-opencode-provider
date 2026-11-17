@@ -34,8 +34,10 @@ export const MODEL_CACHE_SCHEMA_VERSION = 6
 export const MODEL_CACHE_TTL_MS = 86_400_000
 export const CONVERSATION_CACHE_DIR = "cursor-conversations"
 export const CONVERSATION_CACHE_SCHEMA_VERSION = 4
-/** Default retention for a persisted conversation snapshot (24 h). */
+/** Default retention for a persisted conversation snapshot (24 h upstream). */
 export const CONVERSATION_CACHE_TTL_MS = 86_400_000
+/** This fork's snapshot window: 7 d, while abandoned `.tmp` cleanup keeps the 24 h above. */
+export const FORK_SNAPSHOT_CACHE_TTL_MS = 604_800_000
 /**
  * Operator override for snapshot retention. Snapshots older than this are
  * treated as expired, so a longer value keeps a conversation warm across a
@@ -46,15 +48,15 @@ export const CONVERSATION_CACHE_TTL_ENV = "CURSOR_PROVIDER_CACHE_TTL_MS"
 
 /**
  * Snapshot retention in milliseconds: `CONVERSATION_CACHE_TTL_ENV` when it
- * holds a positive safe integer, else the 24 h default. Anything else (empty,
- * non-numeric, zero, negative, unsafe) falls back rather than disabling
- * retention, and a leading `+`/space or float is not a valid integer.
+ * holds a positive safe integer, else this fork's seven-day default. Anything
+ * else (empty, non-numeric, zero, negative, unsafe) falls back rather than
+ * disabling retention. Abandoned `.tmp` cleanup uses `CONVERSATION_CACHE_TTL_MS`.
  */
 export function resolveConversationCacheTtlMs(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env[CONVERSATION_CACHE_TTL_ENV]?.trim()
-  if (!raw || !/^\d+$/.test(raw)) return CONVERSATION_CACHE_TTL_MS
+  if (!raw || !/^\d+$/.test(raw)) return FORK_SNAPSHOT_CACHE_TTL_MS
   const parsed = Number(raw)
-  return parsed > 0 && Number.isSafeInteger(parsed) ? parsed : CONVERSATION_CACHE_TTL_MS
+  return parsed > 0 && Number.isSafeInteger(parsed) ? parsed : FORK_SNAPSHOT_CACHE_TTL_MS
 }
 export const VERSION_CACHE_FILE = "cursor-client-version.json"
 

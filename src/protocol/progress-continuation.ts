@@ -77,12 +77,12 @@ export function isProgressOnlyAssistantText(text: string): boolean {
 }
 
 /**
- * `CURSOR_PROGRESS_CONTINUATION=0|false|off|no` disables the synthetic retry.
- * Upstream callers default to on, so an unset variable keeps today's behavior.
+ * Fork default: progress-only synthetic retries are off. Upstream keeps them on;
+ * set `CURSOR_PROGRESS_CONTINUATION=1|true|on|yes` to opt back in here.
  */
 export function isProgressContinuationEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const value = env.CURSOR_PROGRESS_CONTINUATION?.trim().toLowerCase()
-  return !(value === "0" || value === "false" || value === "off" || value === "no")
+  return value === "1" || value === "true" || value === "on" || value === "yes"
 }
 
 export function shouldContinueProgressOnlyTurn(input: {
