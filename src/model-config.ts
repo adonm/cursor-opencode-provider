@@ -89,7 +89,7 @@ function paramMap(params: ModelVariant["parameterValues"]): Record<string, strin
 }
 
 /** OpenCode's persisted "no explicit variant" sentinel (1.x and 2.x). */
-const RESERVED_VARIANT_KEY = "default"
+export const RESERVED_VARIANT_KEY = "default"
 
 /** Drop a leading model-name prefix from a sanitized variant label. */
 function stripModelPrefix(label: string, prefix: string): string | null {
@@ -196,7 +196,8 @@ function isSeparateContext(mi: ModelInfo, v: ModelVariant): boolean {
     (v.isMaxMode === true && context !== undefined && context !== mi.maxContext)
 }
 
-function contextSuffix(context: number): string {
+/** `1m`, `500k`, `272k` — the tier token shared by catalog ids and variant ids. */
+export function contextSuffix(context: number): string {
   return context % 1_000_000 === 0 ? `${context / 1_000_000}m` : `${context / 1_000}k`
 }
 

@@ -347,6 +347,253 @@ describe("opencode2 provider inventory", () => {
     expect(model.variants[0].settings).toBeDefined()
   })
 
+  test("publishes short effort ids alongside display labels", () => {
+    const levels = ["none", "low", "medium", "high", "max"] as const
+    const deepseek: ModelInfo = {
+      id: "deepseek-v41-flash-1017",
+      displayName: "DeepSeek V4.1 Flash 1017",
+      supportsThinking: false,
+      supportsAgent: true,
+      maxContext: 1_048_576,
+      variants: levels.map((level) => ({
+        key: "deepseek-v41-flash-1017",
+        displayName: `DeepSeek V4.1 Flash 1017 ${level[0]!.toUpperCase()}${level.slice(1)}`,
+        parameterValues: [{ id: "reasoning_effort", value: level }],
+        isDefaultNonMax: level === "high",
+        isDefaultMax: level === "max",
+      })),
+    }
+
+    const { editor, models } = fakeProviderEditor()
+    applyCursorProviderInventory(editor, [deepseek])
+    const model = models.get("cursor/deepseek-v41-flash-1017")!
+    const ids = model.variants.map((variant) => variant.id)
+
+    expect(ids).toContain("Max")
+    for (const level of levels) expect(ids).toContain(level)
+    // One short id per label, never a duplicate of an existing id.
+    expect(new Set(ids).size).toBe(ids.length)
+
+    const displayMax = model.variants.find((variant) => variant.id === "Max")!
+    const shortMax = model.variants.find((variant) => variant.id === "max")!
+    expect(shortMax.settings).toEqual(displayMax.settings)
+  })
+
+  test("normalizes extra-high to xhigh and keeps the shared effort ids", () => {
+    const info = modelConfigEntryToInfo("gpt-5.4-mini", {
+      name: "GPT-5.4 Mini",
+      variants: {
+        None: { cursorVariantParameters: [{ id: "reasoning", value: "none" }] },
+        High: { cursorVariantParameters: [{ id: "reasoning", value: "high" }] },
+        "Extra High": { cursorVariantParameters: [{ id: "reasoning", value: "xhigh" }] },
+      },
+    })
+    const ids = info.variants.map((variant) => variant.id)
+    expect(ids).toContain("none")
+    expect(ids).toContain("high")
+    expect(ids).toContain("xhigh")
+    // Every effort parameter spelling Cursor publishes is recognized.
+    const viaEffort = modelConfigEntryToInfo("grok-4.5", {
+      name: "Grok 4.5",
+      variants: {
+        Low: { cursorVariantParameters: [{ id: "effort", value: "low" }] },
+        High: { cursorVariantParameters: [{ id: "effort", value: "high" }] },
+      },
+    })
+    expect(viaEffort.variants.map((variant) => variant.id)).toContain("high")
+    const viaReasoningEffort = modelConfigEntryToInfo("gemini-4-carbon", {
+      name: "Gemini 4 Carbon",
+      variants: {
+        High: { cursorVariantParameters: [{ id: "reasoning_effort", value: "high" }] },
+      },
+    })
+    expect(viaReasoningEffort.variants.map((variant) => variant.id)).toContain("high")
+  })
+
+  test("omits a bare short id when thinking and non-thinking variants collide", () => {
+    // claude-opus-5 and claude-haiku-5-5 list both "No Thinking High" and
+    // "High": one `high` id cannot say which tuple the user meant.
+    const info = modelConfigEntryToInfo("claude-opus-5", {
+      name: "Claude Opus 5",
+      variants: {
+        "No Thinking Low": {
+          cursorVariantParameters: [
+            { id: "thinking", value: "false" },
+            { id: "effort", value: "low" },
+          ],
+        },
+        "No Thinking High": {
+          cursorVariantParameters: [
+            { id: "thinking", value: "false" },
+            { id: "effort", value: "high" },
+          ],
+        },
+        Low: {
+          cursorVariantParameters: [
+            { id: "thinking", value: "true" },
+            { id: "effort", value: "low" },
+          ],
+        },
+        High: {
+          cursorVariantParameters: [
+            { id: "thinking", value: "true" },
+            { id: "effort", value: "high" },
+          ],
+        },
+      },
+    })
+    const ids = info.variants.map((variant) => variant.id)
+    expect(ids).toEqual(["No Thinking Low", "No Thinking High", "Low", "High"])
+    expect(ids).not.toContain("high")
+    expect(ids).not.toContain("low")
+  })
+
+  test("suffixes short ids only when an entry mixes tiers or speeds", () => {
+    const tiers = modelConfigEntryToInfo("grok-4.7", {
+      name: "Grok 4.7",
+      variants: {
+        High: { cursorVariantParameters: [{ id: "reasoning_effort", value: "high" }] },
+        "High 500k": {
+          cursorVariantParameters: [
+            { id: "reasoning_effort", value: "high" },
+            { id: "context", value: "500k" },
+          ],
+        },
+      },
+    })
+    const tierIds = tiers.variants.map((variant) => variant.id)
+    expect(tierIds).toContain("high")
+    expect(tierIds).toContain("high-500k")
+
+    const speeds = modelConfigEntryToInfo("gpt-5.6-terra", {
+      name: "GPT-5.6 Terra",
+      variants: {
+        High: { cursorVariantParameters: [{ id: "reasoning", value: "high" }] },
+        "High Fast": {
+          cursorVariantParameters: [
+            { id: "reasoning", value: "high" },
+            { id: "fast", value: "true" },
+          ],
+        },
+      },
+    })
+    const speedIds = speeds.variants.map((variant) => variant.id)
+    expect(speedIds).toContain("high")
+    expect(speedIds).toContain("high-fast")
+
+    // A 1m entry alone names its tier in the catalog id, so it stays bare.
+    const long = modelConfigEntryToInfo("claude-sonnet-5-5-1m", {
+      name: "Claude Sonnet 5.5 1M",
+      variants: {
+        High: {
+          cursorVariantParameters: [
+            { id: "reasoning_effort", value: "high" },
+            { id: "context", value: "1m" },
+          ],
+        },
+      },
+    })
+    expect(long.variants.map((variant) => variant.id)).toEqual(["High", "high"])
+
+    const mixed = modelConfigEntryToInfo("claude-opus-5-5", {
+      name: "Claude Opus 5.5",
+      variants: {
+        High: {
+          cursorVariantParameters: [
+            { id: "effort", value: "high" },
+            { id: "context", value: "300k" },
+            { id: "fast", value: "false" },
+          ],
+        },
+        "High Fast": {
+          cursorVariantParameters: [
+            { id: "effort", value: "high" },
+            { id: "context", value: "300k" },
+            { id: "fast", value: "true" },
+          ],
+        },
+        "1M High": {
+          cursorVariantParameters: [
+            { id: "effort", value: "high" },
+            { id: "context", value: "1m" },
+            { id: "fast", value: "false" },
+          ],
+        },
+        "1M High Fast": {
+          cursorVariantParameters: [
+            { id: "effort", value: "high" },
+            { id: "context", value: "1m" },
+            { id: "fast", value: "true" },
+          ],
+        },
+      },
+    })
+    const mixedIds = mixed.variants.map((variant) => variant.id)
+    expect(mixedIds).toContain("high")
+    expect(mixedIds).toContain("high-fast")
+    expect(mixedIds).toContain("high-1m")
+    expect(mixedIds).toContain("high-1m-fast")
+  })
+
+  test("never republishes an existing id or a variant without an effort parameter", () => {
+    const info = modelConfigEntryToInfo("claude-haiku-4-5", {
+      name: "Claude Haiku 4.5",
+      variants: {
+        "No Thinking": { cursorVariantParameters: [{ id: "thinking", value: "false" }] },
+        Thinking: { cursorVariantParameters: [{ id: "thinking", value: "true" }] },
+      },
+    })
+    // A boolean `thinking` parameter is a mode, not an effort level.
+    expect(info.variants.map((variant) => variant.id)).toEqual(["No Thinking", "Thinking"])
+
+    const labelled = modelConfigEntryToInfo("synthetic-model", {
+      name: "Synthetic",
+      variants: {
+        // Already-shaped ids must not gain a duplicate short twin.
+        high: { cursorVariantParameters: [{ id: "reasoning", value: "high" }] },
+        Low: { cursorVariantParameters: [{ id: "reasoning", value: "low" }] },
+      },
+    })
+    expect(labelled.variants.map((variant) => variant.id)).toEqual(["high", "Low", "low"])
+  })
+
+  test("never publishes OpenCode's reserved default variant id", () => {
+    // Both majors treat `default` as "no variant override": 2.x rewrites a
+    // requested `default` to undefined before lookup, so a published tuple
+    // under that id could never be selected. The display-label path already
+    // rewrites it to `Standard`; the short-id path must not republish it.
+    const viaReasoningEffort = modelConfigEntryToInfo("synthetic-default", {
+      name: "Synthetic",
+      variants: {
+        Standard: { cursorVariantParameters: [{ id: "reasoning_effort", value: "default" }] },
+        High: { cursorVariantParameters: [{ id: "reasoning_effort", value: "high" }] },
+      },
+    })
+    expect(viaReasoningEffort.variants.map((variant) => variant.id)).toEqual(["Standard", "High", "high"])
+
+    // Each effort spelling, including a mixed-tier entry where the collision
+    // would otherwise be suffixed rather than dropped.
+    for (const parameter of ["effort", "reasoning", "reasoning_effort"]) {
+      const info = modelConfigEntryToInfo("synthetic-default", {
+        name: "Synthetic",
+        variants: {
+          Default: { cursorVariantParameters: [{ id: parameter, value: "default" }] },
+          "High 500k": {
+            cursorVariantParameters: [
+              { id: parameter, value: "high" },
+              { id: "context", value: "500k" },
+            ],
+          },
+        },
+      })
+      const ids = info.variants.map((variant) => variant.id)
+      expect(ids).not.toContain("default")
+      expect(ids.some((id) => id.startsWith("default-"))).toBe(false)
+      // The tuple the reserved id would have named is still reachable by label.
+      expect(ids).toContain("Default")
+    }
+  })
+
   test("re-applying is idempotent (host replays transforms on reload)", () => {
     const { editor, models, providers } = fakeProviderEditor()
     applyCursorProviderInventory(editor, [baseModel])
