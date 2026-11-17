@@ -76,6 +76,8 @@ const DISPLAY_NAME_TO_MODEL_ID: Record<string, string> = {
   "Gemini 3.7 Flash": "gemini-3.7-flash",
   "Gemini 3.8 Flash": "gemini-3.8-flash",
   "Gemini 4 Argon": "gemini-4-argon",
+  "Gemini 4 Carbon": "gemini-4-carbon",
+  "Gemini 4 Hydrogen": "gemini-4-hydrogen",
   "GLM 5.2": "glm-5.2",
   "GLM 5.3": "glm-5.3",
   "GLM 5.3 Flash": "glm-5.3-flash",
