@@ -21,6 +21,10 @@
 
 ### Fixed
 
+- OpenCode 2.x refreshes an expired Cursor model catalog on host activity without reloading the Location. A failed refresh keeps the last good catalog for the current credential.
+- Pricing generation uses the live GLM 5.3 model IDs and reads pricing notes by header, so added columns no longer hide documented rates.
+- The fork updater verifies a detached merge candidate and prints a fast-forward push for that exact commit. Failed checks leave the live build and published branches unchanged.
+- Fork builds replace `dist/` in a single directory exchange, avoiding missing or nested builds during a swap.
 - Thread listing, the pre-publish thread lookup, and resolution reads no longer call `gh` anonymously. `post`, `threads`, and `complete-resolutions.py` send one credential on every `gh` call: the `--token-env` personal access token when that option is set, otherwise the GitHub App installation token. The named token wins over an ambient `GH_TOKEN` or `GITHUB_TOKEN`.
 - Cancelling `scripts/isolated-check.sh` or `scripts/isolate-run.sh` with TERM, INT, HUP or QUIT sent only to the script's own process now stops the sandboxed command before the archive or staging files are removed, including the `--live` run that holds `CURSOR_API_KEY`; the command used to keep running. A boundary still running `ISOLATE_TERM_GRACE` seconds later (default 10) is killed, and the script exits 128 plus the signal number. `scripts/live-test.sh` also stops OpenCode on QUIT. SIGKILL still cannot be forwarded.
 

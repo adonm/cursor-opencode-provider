@@ -75,6 +75,29 @@ Operator setup: [OpenCode 2.x](../../docs/opencode-2.md).
 
 ## Catalog and permissions
 
+- **A loaded catalog is not a fresh one.** `ensureModels` returned as soon as
+  `modelsLoaded` was set, so the 24 h TTL was only ever read at location setup:
+  a long-lived host kept serving the models it started with, and the usual
+  remedy (write the cache, then reload the location) interrupted running
+  agents. Check the persisted `fetchedAt` of the published catalog on existing
+  activity (the `ctx.event` subscription already rechecked) and publish through
+  `provider.reload()` without restarting the location. Never restamp a cache
+  read at setup — that would reset a 23 h-old catalog's clock — and keep the
+  last good catalog published when the fetch fails or returns empty. Bound
+  retries after a failed recheck so event-heavy sessions cannot hammer
+  discovery, and let a credential switch clear that state
+  (`test/plugin-opencode2.test.ts`, stale catalog recheck while the location
+  stays up).
+  Keep models and their timestamp in one snapshot: `discoverModelCache` returns
+  the entry a refresh wrote (or the stale entry it read), and a later
+  `readCache` is not that entry. Another Location or process shares the file,
+  so re-sampling it can pair these models with the wrong account's catalog and
+  `fetchedAt` — defeating a forced account refresh that had just fetched the
+  authoritative list (`discoverModelCache`, `test/models.test.ts`). The
+  readiness deadline rejects outside the discovery loop, so count failures at
+  the attempt boundary too; otherwise an expired catalog whose recheck timed
+  out opens a new request on the very next activity
+  (`test/plugin-opencode2.test.ts`, readiness timeout while rechecking).
 - **Direct tools require both placement and shape.** Missing `codemode: false`
   hid plugin tools; missing output schemas crashed the host. Todos are an
   opt-in in-memory fallback, not native builtins (`test/todo-tools.test.ts`).

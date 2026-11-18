@@ -13,7 +13,7 @@ for fixes that require a rebuilt local install until the next release.
 
 Discovered Cursor models are published **in memory** through `ctx.provider.transform` → `editor.add({ info, models })` → `ctx.provider.reload()`. The plugin does **not** write a model list into `opencode.json`.
 
-Cache seed (and `/connect` afterwards) refill the inventory. An empty first transform is a no-op, so a failed refresh keeps the last successful list.
+The cache seeds the inventory, and `/connect` refreshes it for the selected credential. After the 24-hour model cache expires, host activity can refresh the inventory without reloading the Location. A failed refresh keeps the last successful list for the same credential.
 
 On OpenCode 2.1.4, session requests wait for plugin activation before resolving
 their model. With no usable cache, setup waits for authenticated discovery and

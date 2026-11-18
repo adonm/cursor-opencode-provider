@@ -124,6 +124,8 @@ Then choose a method:
 
 After login, the plugin fetches your available models and writes them to `<host-cache>/cursor-models.json`. On later startups, a missing, empty, expired, or old-schema cache is refreshed during config load when Cursor auth is available; an existing stale cache remains usable if refresh fails. Completed conversation state is stored separately under `<host-cache>/cursor-conversations/`, with one independently replaced gzip-compressed protobuf snapshot per stable host session. Snapshots are refreshed at each successful Cursor `TurnEnded`, while a turn waits on a host tool, and when OpenCode 2.x stops a turn or shuts down, and restored on demand after provider restarts. A session loads only its own snapshot; it never waits for a directory-wide cleanup. Records not updated within [`CURSOR_PROVIDER_CACHE_TTL_MS`](#environment-variables) (7 days by default in this fork) are rejected on load and collected independently using bounded reads of their persisted metadata, without relying on filesystem modification times; a fixed 24-hour rule collects temp files left by an interrupted save. Full payload and gzip integrity checks run when a snapshot is restored. Cursor's checkpoint is an index of content-addressed KV blobs rather than a self-contained transcript, so the snapshot retains the blobs reachable from the latest checkpoint and discards superseded blobs. This private Cursor state is not a copy of the host's session database.
 
+OpenCode 2.x rechecks the model cache on host activity after 24 hours. A successful refresh updates the picker without reloading the Location; a failed refresh keeps the last catalog for that credential.
+
 ### Paths (host cache)
 
 Model/version caches and Cursor project metadata live under a **host cache root**, resolved in this order:
@@ -503,6 +505,18 @@ bun run generate:images   # live-test image input of untested Cursor models (nee
 ```
 
 **HARD STOP before any version bump or `v*` tag:** run `generate:pricing` and `check:pricing` in the same session, fix any unmapped Cursor display names, commit mapping/`pricing-data.ts` updates, run `generate:images` and commit `image-input-data.ts`, and finalize [`CHANGELOG.md`](CHANGELOG.md) (`[Unreleased]` → dated version) **before** touching `"version"` or creating the tag. Publish CI regenerates rates from the live docs and will fail the release on an unmapped name — that is a last line of defense, not the primary check. See `AGENTS.md` and [Changelog](#changelog).
+
+### Sync this fork
+
+Run `./scripts/sync-upstream.sh` from a clean checkout with `origin` and
+`upstream` configured. It merges upstream and the fork's topic tips in a
+scratch worktree, leaving the current checkout and build alone. If all checks
+pass, it prints a fast-forward push for the exact tested commit. It does not
+push, rebase published branches, or install the candidate into OpenCode.
+
+This fork's `bun run build` uses `python3` to replace an existing `dist/` in one
+operation on Linux or macOS. If the filesystem cannot exchange directories,
+the build fails with the previous `dist/` intact.
 
 ## Architecture
 
