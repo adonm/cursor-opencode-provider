@@ -79,8 +79,9 @@ const DISPLAY_NAME_TO_MODEL_ID: Record<string, string> = {
   "Gemini 4 Carbon": "gemini-4-carbon",
   "Gemini 4 Hydrogen": "gemini-4-hydrogen",
   "GLM 5.2": "glm-5.2",
-  "GLM 5.3": "glm-5.3",
-  "GLM 5.3 Flash": "glm-5.3-flash",
+  // Live AvailableModels serves the 5.3 pair as glm-5p3 ids, not glm-5.3.
+  "GLM 5.3": "glm-5p3",
+  "GLM 5.3 Flash": "glm-5p3-flash",
   "GPT-5 Mini": "gpt-5-mini",
   // Cursor lists Codex-branded GPT-5.1 rows; our AvailableModels id is gpt-5.1.
   "GPT-5.1 Codex": "gpt-5.1",
@@ -301,6 +302,7 @@ export function catalogIdForPricingDisplayName(displayName: string): string | un
 function parsePricingTables(markdown: string): ParsedRow[] {
   const rows: ParsedRow[] = []
   let inTable = false
+  let notesIndex = -1
 
   for (const line of markdown.split(/\r?\n/)) {
     if (!line.startsWith("|")) {
@@ -318,6 +320,7 @@ function parsePricingTables(markdown: string): ParsedRow[] {
     if (!inTable) {
       if (cells.length >= 6 && isPricingTableHeader(cells)) {
         inTable = true
+        notesIndex = cells.findIndex((cell) => cell.toLowerCase() === "notes")
       }
       continue
     }
@@ -342,7 +345,7 @@ function parsePricingTables(markdown: string): ParsedRow[] {
       output,
       cacheRead,
       cacheWrite,
-      notes: cells[6] ?? "",
+      notes: notesIndex < 0 ? "" : (cells[notesIndex] ?? ""),
       // Cursor publishes some long-context rates as separate rows (`1M`, `500k`)
       // instead of only as a note on the base model.
       isExplicitLongContextRow: /\b1M\b/i.test(displayName) || /\b500k\b/i.test(displayName),

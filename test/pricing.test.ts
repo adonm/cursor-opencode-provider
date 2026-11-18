@@ -62,8 +62,15 @@ describe("pricing", () => {
       input: 5,
       output: 30,
       cache_read: 0.5,
+      context_over_200k: {
+        input: 10,
+        output: 30,
+        cache_read: 1,
+      },
     })
-    expect(getCursorModelCost("gpt-5.5")?.context_over_200k).toBeUndefined()
+    // "no long-context surcharge" notes must not synthesize a 2x tier.
+    expect(getCursorModelCost("claude-sonnet-5")?.context_over_200k).toBeUndefined()
+    expect(getCursorModelCost("kimi-k3")?.context_over_200k).toBeUndefined()
   })
 
   it("maps Cursor Models pool rates, including Fast variants", () => {
@@ -173,6 +180,21 @@ describe("pricing", () => {
     expect(catalogIdForPricingDisplayName("Unknown (Fast)")).toBeUndefined()
   })
 
+  it("maps GLM 5.3 rows onto the served glm-5p3 catalog ids", () => {
+    expect(catalogIdForPricingDisplayName("GLM 5.3")).toBe("glm-5p3")
+    expect(catalogIdForPricingDisplayName("GLM 5.3 Flash")).toBe("glm-5p3-flash")
+    expect(getCursorModelCost("glm-5p3")).toEqual({
+      input: 1.4,
+      output: 4.4,
+      cache_read: 0.26,
+    })
+    expect(getCursorModelCost("glm-5p3-flash")).toEqual({
+      input: 0.15,
+      output: 0.5,
+      cache_read: 0.029,
+    })
+  })
+
   it("imports Fast rows from the Cursor Models table without folding them into Other Models", () => {
     const markdown = `
 ## Cursor Models
@@ -246,6 +268,55 @@ describe("pricing", () => {
       },
     ])
     expect(toOpenCode2Costs(undefined)).toEqual([])
+  })
+
+  it("reads pricing notes in published tables with or without a residency column", () => {
+    const fixture = (name: string) =>
+      readFileSync(join(import.meta.dir, "fixtures", name), "utf8")
+
+    const current = buildPricingTable(fixture("cursor-pricing-current.md"))
+    expect(current["gpt-5.4"]).toEqual({
+      input: 2.5,
+      output: 15,
+      cache_read: 0.25,
+      context_over_200k: { input: 5, output: 15, cache_read: 0.5 },
+    })
+    expect(current["claude-sonnet-5"]?.context_over_200k).toBeUndefined()
+    expect(current["gpt-5.6-luna"]).toEqual({
+      input: 0.2,
+      output: 1.2,
+      cache_read: 0.02,
+      cache_write: 0.25,
+      context_over_200k: {
+        input: 0.4,
+        output: 1.2,
+        cache_read: 0.04,
+        cache_write: 0.5,
+      },
+    })
+    expect(current["gemini-4-carbon"]).toEqual({ input: 2, output: 10, cache_read: 0.1 })
+    expect(current["glm-5p3"]).toEqual({ input: 1.4, output: 4.4, cache_read: 0.26 })
+    expect(current["composer-2.5"]).toEqual({ input: 0.5, output: 2.5, cache_read: 0.2 })
+
+    const legacy = buildPricingTable(fixture("cursor-pricing-legacy.md"))
+    expect(legacy["composer-2.5-fast"]).toEqual({ input: 3, output: 15, cache_read: 0.5 })
+    expect(legacy["claude-sonnet-4"]).toEqual({
+      input: 3,
+      output: 15,
+      cache_read: 0.3,
+      cache_write: 3.75,
+      context_over_200k: { input: 6, output: 22.5, cache_read: 0.6, cache_write: 7.5 },
+    })
+    expect(legacy["gpt-5.4"]).toEqual({
+      input: 2.5,
+      output: 15,
+      cache_read: 0.25,
+      context_over_200k: { input: 5, output: 15, cache_read: 0.5 },
+    })
+    for (const entry of [...Object.values(current), ...Object.values(legacy)]) {
+      expect(entry.input).toBeGreaterThan(0)
+      expect(entry.output).toBeGreaterThan(0)
+    }
   })
 
   it("reports coverage for the fixture model list", () => {
