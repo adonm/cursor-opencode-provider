@@ -5,6 +5,7 @@ import path from "node:path"
 import {
   mapAvailableModelsResponse,
   discoverModels,
+  discoverModelCache,
   isCacheFresh,
   cacheFilePath,
   normalizeModelCache,
@@ -1386,6 +1387,77 @@ describe("model cache integrity", () => {
     await expect(writeCache(directory, invalid)).rejects.toThrow(/invalid Cursor model cache/)
     expect(await readCache(directory)).toEqual(cache)
     expect((await fs.readdir(directory)).filter((name) => name.includes(".tmp"))).toEqual([])
+  })
+
+  it("returns a value snapshot: an immediately succeeding write does not change its models or age", async () => {
+    const directory = await tempDir()
+    await writeCache(directory, testCache("old-account"))
+    using server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({
+          models: [{ name: "new-account", client_display_name: "New Account", supports_agent: true, variants: [] }],
+        })
+      },
+    })
+    const previousVersion = process.env.CURSOR_CLIENT_VERSION
+    process.env.CURSOR_CLIENT_VERSION = "cli-test"
+    resetClientVersionCache()
+    try {
+      const snapshot = await discoverModelCache("new-account-token", directory, {
+        baseURL: server.url.origin,
+        forceRefresh: true,
+      })
+      // `fetchedAt` is the timestamp written *with* these models, so the pair
+      // cannot drift apart.
+      const persisted = await readCache(directory)
+      expect(persisted).toBeTruthy()
+      expect(snapshot.models.map((model) => model.id)).toEqual(["new-account"])
+      expect(snapshot.fetchedAt).toBe(persisted!.fetchedAt)
+      expect(snapshot.schemaVersion).toBe(MODEL_CACHE_SCHEMA_VERSION)
+
+      // Another Location writes immediately after this refresh. The snapshot
+      // keeps the catalog and age it reported; a reader that sampled the disk
+      // again would instead pair the other account's models with its clock.
+      const other = { ...testCache("other-process"), fetchedAt: Date.now() + 60_000 }
+      await writeCache(directory, other)
+      expect(snapshot.models.map((model) => model.id)).toEqual(["new-account"])
+      expect(snapshot.fetchedAt).not.toBe(other.fetchedAt)
+      expect(isCacheFresh(snapshot)).toBe(true)
+      // The next discovery sees the other writer's catalog, not a stale alias.
+      expect((await readCache(directory))?.models.map((model) => model.id)).toEqual(["other-process"])
+    } finally {
+      if (previousVersion === undefined) delete process.env.CURSOR_CLIENT_VERSION
+      else process.env.CURSOR_CLIENT_VERSION = previousVersion
+      resetClientVersionCache()
+    }
+  })
+
+  it("serves the exact stale entry it read when a fetch fails", async () => {
+    const directory = await tempDir()
+    const stale = { ...testCache("stale-account"), fetchedAt: Date.now() - 30 * 3_600_000 }
+    await writeCache(directory, stale)
+    using server = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response("unavailable", { status: 503 })
+      },
+    })
+    const previousVersion = process.env.CURSOR_CLIENT_VERSION
+    process.env.CURSOR_CLIENT_VERSION = "cli-test"
+    resetClientVersionCache()
+    try {
+      const snapshot = await discoverModelCache("token", directory, { baseURL: server.url.origin })
+      // The stale catalog keeps its own age; stamping this call's clock would
+      // make an expired catalog look fresh for another full TTL.
+      expect(snapshot.models.map((model) => model.id)).toEqual(["stale-account"])
+      expect(snapshot.fetchedAt).toBe(stale.fetchedAt)
+      expect(isCacheFresh(snapshot)).toBe(false)
+    } finally {
+      if (previousVersion === undefined) delete process.env.CURSOR_CLIENT_VERSION
+      else process.env.CURSOR_CLIENT_VERSION = previousVersion
+      resetClientVersionCache()
+    }
   })
 
   it("coalesces concurrent refreshes for the same cache directory", async () => {

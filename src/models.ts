@@ -646,13 +646,21 @@ export async function fetchModels(
   return mapAvailableModelsResponse(raw)
 }
 
-const refreshesByDirectory = new Map<string, Promise<ModelInfo[]>>()
+const refreshesByDirectory = new Map<string, Promise<ModelCache>>()
 
-export async function refreshModelCache(
+/**
+ * The cache entry this refresh wrote, models plus the exact `fetchedAt` that
+ * went to disk.
+ *
+ * Callers that record catalog freshness must take this snapshot, not a later
+ * `readCache`: another Location or process can write a different account's
+ * catalog in between, so a second read is not the catalog this fetch produced.
+ */
+async function refreshModelCacheSnapshot(
   cacheDir: string,
   fetcher: () => Promise<ModelInfo[]>,
   options: { forceAfterInflight?: boolean } = {},
-): Promise<ModelInfo[]> {
+): Promise<ModelCache> {
   const key = path.resolve(cacheDir)
   const existing = refreshesByDirectory.get(key)
   if (existing) {
@@ -661,16 +669,17 @@ export async function refreshModelCache(
     // the previous account. Wait for that write to finish, then run this
     // caller's fetch so its account inventory is authoritative on disk.
     await existing.catch(() => {})
-    return refreshModelCache(cacheDir, fetcher, options)
+    return refreshModelCacheSnapshot(cacheDir, fetcher, options)
   }
   const refresh = (async () => {
     const models = await fetcher()
-    await writeCache(cacheDir, {
+    const snapshot: ModelCache = {
       models,
       fetchedAt: Date.now(),
       schemaVersion: MODEL_CACHE_SCHEMA_VERSION,
-    })
-    return models
+    }
+    await writeCache(cacheDir, snapshot)
+    return snapshot
   })()
   refreshesByDirectory.set(key, refresh)
   try {
@@ -680,28 +689,57 @@ export async function refreshModelCache(
   }
 }
 
+export async function refreshModelCache(
+  cacheDir: string,
+  fetcher: () => Promise<ModelInfo[]>,
+  options: { forceAfterInflight?: boolean } = {},
+): Promise<ModelInfo[]> {
+  return (await refreshModelCacheSnapshot(cacheDir, fetcher, options)).models
+}
+
+export type DiscoverModelsOptions = {
+  baseURL?: string
+  headers?: Record<string, string>
+  timeoutMs?: number
+  /**
+   * Bypass even a fresh cache and require an authoritative response.
+   *
+   * Model availability is account-scoped. Callers use this after a
+   * credential switch so a fresh cache produced by the previous account is
+   * never rebound to the new connection. A forced refresh rejects on fetch
+   * failure; the caller can keep the already-published inventory unchanged.
+   */
+  forceRefresh?: boolean
+}
+
 export async function discoverModels(
   token: string,
   cacheDir: string,
-  options: {
-    baseURL?: string
-    headers?: Record<string, string>
-    timeoutMs?: number
-    /**
-     * Bypass even a fresh cache and require an authoritative response.
-     *
-     * Model availability is account-scoped. Callers use this after a
-     * credential switch so a fresh cache produced by the previous account is
-     * never rebound to the new connection. A forced refresh rejects on fetch
-     * failure; the caller can keep the already-published inventory unchanged.
-     */
-    forceRefresh?: boolean
-  } = {},
+  options: DiscoverModelsOptions = {},
 ): Promise<ModelInfo[]> {
+  return (await discoverModelCache(token, cacheDir, options)).models
+}
+
+/**
+ * Discovery that also reports which cache entry the result came from.
+ *
+ * A caller that tracks catalog freshness must not re-read the cache afterwards:
+ * a concurrent Location or process can replace it with a different account's
+ * catalog, which would pair these models with the wrong `fetchedAt` (and, on a
+ * forced account refresh, discard the authoritative result it just fetched).
+ * The returned snapshot is the fetched catalog and the timestamp written with
+ * it, or the exact cache entry read here — including the stale entry served
+ * when a non-forced fetch fails.
+ */
+export async function discoverModelCache(
+  token: string,
+  cacheDir: string,
+  options: DiscoverModelsOptions = {},
+): Promise<ModelCache> {
   const { forceRefresh = false, ...fetchOptions } = options
   const cached = await readCache(cacheDir)
   const refresh = () =>
-    refreshModelCache(
+    refreshModelCacheSnapshot(
       cacheDir,
       () => fetchModels(token, fetchOptions),
       { forceAfterInflight: forceRefresh },
@@ -714,7 +752,7 @@ export async function discoverModels(
       .catch(() => {
         /* background refresh failure is non-fatal */
       })
-    return cached.models
+    return cached
   }
 
   // Cache exists but expired → try fetch, serve stale on failure
@@ -723,7 +761,7 @@ export async function discoverModels(
       return await refresh()
     } catch (error) {
       if (forceRefresh) throw error
-      return cached.models
+      return cached
     }
   }
 

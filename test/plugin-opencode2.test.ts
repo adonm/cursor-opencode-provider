@@ -1838,6 +1838,217 @@ describe("opencode2 setup", () => {
     })
   })
 
+  describe("stale catalog recheck while the location stays up", () => {
+    const modelResponse = (ids: readonly string[]) => Response.json({
+      models: ids.map((id) => ({ name: id, client_display_name: id, supports_agent: true, variants: [] })),
+    })
+    const connectedContext = (bus: ReturnType<typeof fakeEventBus>) => {
+      const host = fakeContext()
+      host.ctx.event.subscribe = bus.subscribe
+      host.ctx.integration.connection.active = async () => ({ type: "credential", id: "account", label: "Cursor" })
+      host.ctx.integration.connection.resolve = async () => ({ type: "key", key: "test.account.jwt" })
+      return host
+    }
+    const until = async (ready: () => boolean | Promise<boolean>) => {
+      for (let i = 0; i < 200; i++) {
+        if (await ready()) return
+        await Bun.sleep(5)
+      }
+      expect(await ready()).toBe(true)
+    }
+    const seedCache = (cacheDir: string, ids: readonly string[], fetchedAt: number) =>
+      writeCache(cacheDir, {
+        models: ids.map((id) => ({ ...baseModel, id, displayName: id })),
+        fetchedAt,
+        schemaVersion: MODEL_CACHE_SCHEMA_VERSION,
+      })
+    /** Run with `fetch` replaced; every path restores it, including a failure. */
+    const withStubFetch = async (stub: typeof fetch, body: () => Promise<void>) => {
+      const original = globalThis.fetch
+      globalThis.fetch = stub
+      try {
+        await body()
+      } finally {
+        globalThis.fetch = original
+        setSystemTime()
+      }
+    }
+
+    test("an initialized setup rechecks an expired catalog on activity and publishes in place", async () =>
+      withTempHostCache(async (cacheDir) => {
+        const start = Date.now()
+        // Fresh at setup: the TTL expires only after the location is running.
+        await seedCache(cacheDir, ["cached-model"], start - 23 * 3_600_000)
+        const bus = fakeEventBus()
+        const { ctx, inventory, reloads } = connectedContext(bus)
+        let requests = 0
+        let mode: "ok" | "unavailable" | "empty" = "ok"
+        await withStubFetch(
+          (async (input: RequestInfo | URL) => {
+            if (!String(input).endsWith("/AvailableModels")) return Response.json({})
+            requests++
+            if (mode === "unavailable") return Response.json({ error: "unavailable" }, { status: 503 })
+            if (mode === "empty") return Response.json({ models: [] })
+            return modelResponse(["cached-model", "new-model"])
+          }) as typeof fetch,
+          async () => {
+            setSystemTime(new Date(start))
+            const cleanup = await setupPlugin(ctx)
+            expect(inventory.models.has("cursor/cached-model")).toBe(true)
+            // The cache publication (1) and the post-activation refresh (2) both
+            // land before the clock moves; neither discovers a fresh catalog.
+            await until(() => reloads.length >= 2)
+            expect(requests).toBe(0)
+            const setupReloads = reloads.length
+
+            // Same clock: events right after setup must not discover either.
+            await bus.publish({ type: "session.updated", data: { sessionID: "s1" } })
+            await bus.publish({ type: "message.updated", data: { sessionID: "s1" } })
+            await Bun.sleep(20)
+            expect(requests).toBe(0)
+
+            mode = "unavailable"
+            setSystemTime(new Date(start + 25 * 3_600_000))
+            await bus.publish({ type: "session.updated", data: { sessionID: "s1" } })
+            await until(() => requests === 1)
+            await Bun.sleep(20)
+            // A failed recheck keeps the last good catalog published.
+            expect(inventory.models.has("cursor/cached-model")).toBe(true)
+            expect(inventory.models.has("cursor/new-model")).toBe(false)
+
+            // Several events inside the backoff neither retry nor republish.
+            await bus.publish({ type: "message.updated", data: { sessionID: "s1" } })
+            await bus.publish({ type: "message.updated", data: { sessionID: "s1" } })
+            await Bun.sleep(20)
+            expect(requests).toBe(1)
+            expect(reloads.length).toBe(setupReloads)
+
+            // Empty discovery is the same outcome: no publish, catalog retained.
+            mode = "empty"
+            setSystemTime(new Date(start + 25 * 3_600_000 + 61_000))
+            await bus.publish({ type: "session.updated", data: { sessionID: "s1" } })
+            await until(() => requests === 2)
+            await Bun.sleep(20)
+            expect(inventory.models.has("cursor/cached-model")).toBe(true)
+            expect(inventory.models.has("cursor/new-model")).toBe(false)
+            expect(reloads.length).toBe(setupReloads)
+
+            mode = "ok"
+            setSystemTime(new Date(start + 25 * 3_600_000 + 61_000 + 121_000))
+            await bus.publish({ type: "session.updated", data: { sessionID: "s1" } })
+            await until(() => inventory.models.has("cursor/new-model"))
+            expect(requests).toBe(3)
+            expect(inventory.models.has("cursor/cached-model")).toBe(true)
+            expect(reloads.length).toBeGreaterThan(setupReloads)
+            await cleanup()
+          },
+        )
+      }))
+
+    test("simultaneous activity shares one recheck and a fresh catalog is not rechecked", async () =>
+      withTempHostCache(async (cacheDir) => {
+        const start = Date.now()
+        await seedCache(cacheDir, ["cached-model"], start - 23 * 3_600_000)
+        const bus = fakeEventBus()
+        const { ctx, inventory } = connectedContext(bus)
+        let requests = 0
+        let release!: () => void
+        const gate = new Promise<void>((resolve) => { release = resolve })
+        await withStubFetch(
+          (async (input: RequestInfo | URL) => {
+            if (!String(input).endsWith("/AvailableModels")) return Response.json({})
+            requests++
+            await gate
+            return modelResponse(["cached-model", "new-model"])
+          }) as typeof fetch,
+          async () => {
+            setSystemTime(new Date(start))
+            const cleanup = await setupPlugin(ctx)
+            expect(inventory.models.has("cursor/cached-model")).toBe(true)
+            // A fresh catalog must not discover, so nothing is in flight when
+            // the clock moves past the TTL.
+            await bus.publish({ type: "session.updated", data: { sessionID: "s1" } })
+            await Bun.sleep(20)
+            expect(requests).toBe(0)
+
+            setSystemTime(new Date(start + 25 * 3_600_000))
+            await Promise.all([
+              bus.publish({ type: "session.updated", data: { sessionID: "s1" } }),
+              bus.publish({ type: "message.updated", data: { sessionID: "s1" } }),
+              bus.publish({ type: "session.updated", data: { sessionID: "s2" } }),
+            ])
+            await until(() => requests === 1)
+            release()
+            await until(() => inventory.models.has("cursor/new-model"))
+            // The recheck published a catalog stamped now, so later traffic stops.
+            await bus.publish({ type: "message.updated", data: { sessionID: "s1" } })
+            await Bun.sleep(20)
+            expect(requests).toBe(1)
+            await cleanup()
+          },
+        )
+        release()
+      }))
+
+    test("a readiness timeout while rechecking an expired catalog backs off instead of retrying each activity", async () =>
+      withTempHostCache(async (cacheDir) => {
+        const start = Date.now()
+        // Already loaded and published at setup; only the TTL has expired.
+        await seedCache(cacheDir, ["cached-model"], start - 23 * 3_600_000)
+        const bus = fakeEventBus()
+        const { ctx, inventory, reloads } = connectedContext(bus)
+        let resolutions = 0
+        let requests = 0
+        let stalled = true
+        const originalFetch = globalThis.fetch
+        const resolve = ctx.integration.connection.resolve
+        try {
+          // Stub before setup: its post-activation endpoint warmup must stay
+          // off the network too, and only AvailableModels is counted.
+          globalThis.fetch = (async (input: RequestInfo | URL) => {
+            if (!String(input).endsWith("/AvailableModels")) return Response.json({})
+            requests++
+            return modelResponse(["cached-model", "new-model"])
+          }) as typeof fetch
+          const cleanup = await setupPlugin(ctx)
+          expect(inventory.models.has("cursor/cached-model")).toBe(true)
+          // Let setup's own post-activation refresh finish, so the attempt this
+          // test stalls is a later recheck and not that one.
+          await until(() => reloads.length >= 2)
+          // Past the TTL the recheck stalls before it can even fetch, so the
+          // readiness deadline — not the fetch — is what ends the attempt.
+          setSystemTime(new Date(start + 25 * 3_600_000))
+          ctx.integration.connection.resolve = async () => {
+            resolutions++
+            if (stalled) return new Promise(() => {})
+            return resolve()
+          }
+          await bus.publish({ type: "session.updated", data: { sessionID: "s1" } })
+          await until(() => resolutions === 1)
+          // Let the ten-second readiness deadline fail that attempt.
+          await Bun.sleep(10_500)
+          expect(requests).toBe(0)
+          expect(inventory.models.has("cursor/cached-model")).toBe(true)
+          // Immediately afterwards, ordinary activity must stay inside the
+          // failure backoff: a deadline that escaped the failure accounting
+          // would open a fresh attempt on the very next event.
+          stalled = false
+          for (let i = 0; i < 5; i++) await bus.publish({ type: "message.updated", data: { sessionID: "s1" } })
+          await Bun.sleep(50)
+          expect(resolutions).toBe(1)
+          expect(requests).toBe(0)
+          expect(inventory.models.has("cursor/cached-model")).toBe(true)
+          expect(inventory.models.has("cursor/new-model")).toBe(false)
+          await cleanup()
+        } finally {
+          stalled = false
+          ctx.integration.connection.resolve = resolve
+          globalThis.fetch = originalFetch
+          setSystemTime()
+        }
+      }), 20_000)
+  })
+
   test("credential updates replace a fresh cache with the selected account's inventory", async () => {
     const cacheDir = mkdtempSync(join(tmpdir(), "cursor-oc2-account-switch-"))
     const previousApiBase = process.env.CURSOR_API_BASE_URL

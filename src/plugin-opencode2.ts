@@ -7,7 +7,13 @@ import {
 } from "./shared.js"
 import { createSdk, cursorApiBaseURL, cursorGetServerConfigTelemetryEnabled, isCursorPackage } from "./plugin-core.js"
 import { opencode2PlanDir, opencodeGlobalCacheDir, setNativePlansDir } from "./context/paths.js"
-import { discoverModels, isCacheFresh, readCache, type ModelInfo } from "./models.js"
+import {
+  discoverModelCache,
+  isCacheFresh,
+  readCache,
+  type ModelCache,
+  type ModelInfo,
+} from "./models.js"
 import { resolveAgentUrl } from "./agent-url.js"
 import { applyHostPromptEvent, applyHostToolEvent, sessionActivity } from "./activity.js"
 import { notifyHostInterrupt } from "./host-interrupt.js"
@@ -92,15 +98,23 @@ import type {
  * not a .js path).
  */
 
+/**
+ * The catalog to publish, with the freshness timestamp it belongs to.
+ *
+ * A fresh cache is reused as read. Otherwise discovery returns the snapshot it
+ * fetched and wrote (or the expired entry it served after a failed fetch), so
+ * freshness always describes these exact models. Re-reading the cache here
+ * instead could pair them with a catalog another Location wrote meanwhile.
+ */
 async function loadModels(
   cacheDir: string,
   accessToken: string,
   forceRefresh = false,
-): Promise<ModelInfo[]> {
+): Promise<ModelCache> {
   const cached = await readCache(cacheDir)
-  if (!forceRefresh && cached?.models.length && isCacheFresh(cached)) return cached.models
+  if (!forceRefresh && cached?.models.length && isCacheFresh(cached)) return cached
 
-  return discoverModels(accessToken, cacheDir, {
+  return discoverModelCache(accessToken, cacheDir, {
     baseURL: cursorApiBaseURL(),
     // An empty response can be cached; it must not pin later retries to [].
     forceRefresh: forceRefresh || cached?.models.length === 0,
@@ -609,41 +623,82 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
     let modelsLoaded = false
     let credentialGeneration = 0
     let loadedCredentialGeneration = 0
+    // The persisted catalog this setup published, with its own `fetchedAt`.
+    // Publication never restamps it: a cache read at location setup keeps its
+    // age, so the 24 h TTL still expires while the host keeps running.
+    let loadedCatalog: ModelCache | undefined
+    // Bounded retry for a recheck that already failed, consulted by activity
+    // driven rechecks only. Startup and credential changes always try.
+    let refreshRetryAt = 0
+    let refreshRetryDelayMs = 0
     let ensureInflight: Promise<void> | undefined
+    const noteRefreshFailure = () => {
+      // Only a loaded catalog can be rechecked, so failures before that are
+      // the unchanged startup path and must not pre-inflate this delay.
+      if (!modelsLoaded) return
+      refreshRetryDelayMs = Math.min(
+        Math.max(refreshRetryDelayMs * 2, MODEL_REFRESH_RETRY_MIN_MS),
+        MODEL_REFRESH_RETRY_MAX_MS,
+      )
+      refreshRetryAt = Date.now() + refreshRetryDelayMs
+    }
     const ensureModels = (timeoutMs = MODEL_READINESS_TIMEOUT_MS): Promise<void> => {
       if (disposed) return Promise.resolve()
       if (modelsLoaded && loadedCredentialGeneration === credentialGeneration) {
-        return Promise.resolve()
+        // Only a catalog past its persisted TTL is rechecked: one read moments
+        // ago is not refreshed again on the next event.
+        if (loadedCatalog === undefined || isCacheFresh(loadedCatalog)) return Promise.resolve()
+        // A failed attempt keeps the published catalog and waits for its
+        // bounded retry, so ordinary session traffic cannot hammer discovery.
+        if (Date.now() < refreshRetryAt) return Promise.resolve()
       }
       // If credentials change during an existing discovery, wait for that
       // attempt and immediately run again. The generation check prevents the
       // older attempt from suppressing the account-scoped refresh.
       if (ensureInflight) return ensureInflight
 
+      // Re-read per iteration: a credential switch mid-flight makes the current
+      // attempt stale, and the loop must then run again for the new account
+      // instead of spinning on a generation it can never match.
+      let attemptGeneration = credentialGeneration
       ensureInflight = withAbortDeadline(timeoutMs, modelReadinessTimeout, async (signal) => {
         while (!disposed && !signal.aborted) {
-          const attemptGeneration = credentialGeneration
+          attemptGeneration = credentialGeneration
           const current = () => !disposed && !signal.aborted && credentialGeneration === attemptGeneration
           const forceRefresh = loadedCredentialGeneration !== attemptGeneration
           let token: string
-          let discovered: ModelInfo[]
+          let loaded: ModelCache
           try {
             // Preserve auth failures; only a missing connection is normal startup.
             token = await requireCursorAccessToken(ctx.integration)
             if (!current()) continue
-            discovered = await loadModels(cacheDir, token, forceRefresh)
+            loaded = await loadModels(cacheDir, token, forceRefresh)
           } catch (error) {
+            // A superseded attempt is not this account's failure to back off.
             if (!current()) continue
             if (error instanceof CursorAuthError && error.code === "no_credential") {
               trace("opencode2 models: no Cursor credential; connect Cursor first")
+              // Normal at startup (no loaded catalog to recheck). With one
+              // already published, /connect resets this state; meanwhile the
+              // bounded retry keeps every event from retrying the store.
+              noteRefreshFailure()
               return
             }
             throw error
           }
+          const discovered = loaded.models
           if (!current()) continue
           if (!discovered.length) throw new CursorProtocolError("Cursor returned an empty model catalog", {
             code: "CURSOR_EMPTY_MODEL_CATALOG",
           })
+          const fresh = isCacheFresh(loaded)
+          // A failed recheck can fall back to an expired disk snapshot. Keep
+          // the visible inventory rather than replaying that snapshot.
+          if (modelsLoaded && !fresh) {
+            noteRefreshFailure()
+            trace(`opencode2 models: recheck kept previous inventory`)
+            return
+          }
           try {
             if (!await publishModels(discovered, current)) continue
           } catch (error) {
@@ -655,6 +710,16 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
           if (!current()) continue
           modelsLoaded = true
           loadedCredentialGeneration = attemptGeneration
+          loadedCatalog = loaded
+          if (fresh) {
+            refreshRetryAt = 0
+            refreshRetryDelayMs = 0
+          } else {
+            // Discovery failed and served the previous catalog: it stays
+            // published, and the next retry waits for the backoff.
+            noteRefreshFailure()
+            trace(`opencode2 models: recheck kept an expired catalog count=${discovered.length}`)
+          }
           void resolveAgentUrl(token, {
             apiBaseURL: cursorApiBaseURL(),
             telemetryEnabled: cursorGetServerConfigTelemetryEnabled(),
@@ -662,6 +727,14 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
           trace(`opencode2 models: ready count=${discovered.length}`)
           return
         }
+      }).catch((error: unknown) => {
+        // One failure per attempt, including a readiness timeout that rejects
+        // from `withAbortDeadline` rather than from the loop above. Counting
+        // here keeps an expired-catalog recheck on the backoff instead of
+        // opening a fresh request on the next activity. A superseded attempt
+        // belongs to the previous credential generation, not this one.
+        if (!disposed && credentialGeneration === attemptGeneration) noteRefreshFailure()
+        throw error
       }).finally(() => { ensureInflight = undefined })
       return ensureInflight
     }
@@ -685,6 +758,9 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
 
     const onCredentialSwitch = () => {
       modelsLoaded = false
+      loadedCatalog = undefined
+      refreshRetryAt = 0
+      refreshRetryDelayMs = 0
       credentialGeneration++
     }
 
@@ -726,6 +802,13 @@ const plugin: Plugin2 & { server: typeof CursorPlugin } = {
 
 const SHUTDOWN_SAVE_TIMEOUT_MS = 2_000
 const MODEL_READINESS_TIMEOUT_MS = 10_000
+/**
+ * Bounded backoff for a model recheck that failed after startup. Discovery at
+ * startup and after a credential switch is unchanged; only rechecks after an
+ * expired TTL wait, so a failing endpoint is not asked on every host event.
+ */
+const MODEL_REFRESH_RETRY_MIN_MS = 60_000
+const MODEL_REFRESH_RETRY_MAX_MS = 15 * 60_000
 
 function modelReadinessTimeout(): CursorTransportError {
   return new CursorTransportError(
