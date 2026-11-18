@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# Rebuild this fork's integration branch from upstream plus its topic branches.
+# Build a verified merge candidate for `main`; never touch live refs or files.
 #
-# Layout:
-#   upstream-main   mirror of upstream/main
-#   TOPICS          one reviewable change each, rebased onto upstream/main so
-#                   they can stay upstream PRs
-#   fork/base       merge of upstream/main and every topic; the fork-only base
-#   fork/defaults   fork-only commits, strictly linear above fork/base
-#   main            fast-forwarded to fork/defaults
-#
-# Open-PR topics are pinned: their pushed commits are reviewed history, so they
-# are merged as-is instead of being rebased here.
+# `origin/main` already contains `fork/base`, `fork/defaults` and every topic:
+# a normal merge preserves them, so this sync does not rebuild those branches.
+# It merges the current upstream main and the newest topic tips onto a detached
+# candidate seeded from `origin/main` (or from the local `main` when that only
+# adds commits), then verifies the candidate in a scratch worktree outside this
+# checkout. Topic histories are merged, never rebased. Fetches land in a private
+# ref namespace, so no branch and no remote-tracking ref moves before every
+# check passes, and nothing is pushed: the output names the exact tested SHA and
+# a fast-forward push for it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -19,134 +18,185 @@ TOPICS=(
   feat/cache-ttl-env
   perf/cache-ttl-and-lean-runtime
 )
-# Topics whose commits are already pushed for review. Rebasing them would
-# rewrite reviewed history and desync the open PRs.
-PINNED_TOPICS=(
-  fix/short-variant-aliases
-  feat/cache-ttl-env
-)
-FORK_BASE=fork/base
-FORK_DEFAULTS=fork/defaults
+# Private, unpublished refs: a fetch cache and the last verified candidate.
+FETCH_NS=refs/sync-upstream
+CANDIDATE_REF=$FETCH_NS/candidate
 
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  echo "sync-upstream: working tree is not clean; commit or stash first" >&2
-  exit 1
-fi
+die() { echo "sync-upstream: $*" >&2; exit 1; }
+is_ancestor() { git merge-base --is-ancestor "$1" "$2" 2>/dev/null; }
 
-is_pinned() {
-  local candidate="$1" topic
-  for topic in "${PINNED_TOPICS[@]}"; do
-    [ "$topic" = "$candidate" ] && return 0
+# Run inside the candidate worktree, as one link of an explicit `&&` chain: a
+# build that emitted nothing must not pass for a verified candidate.
+require_dist_artifacts() {
+  local artifact missing=""
+  for artifact in dist/index.js dist/index.d.ts; do
+    [ -s "$artifact" ] || missing="$missing $artifact"
   done
-  return 1
+  if [ -n "$missing" ]; then
+    echo "sync-upstream: the build emitted no usable:$missing; the candidate is unverified" >&2
+    return 1
+  fi
 }
 
-old_base=$(git rev-parse "$FORK_BASE" 2>/dev/null || echo "")
-if [ -z "$old_base" ]; then
-  echo "sync-upstream: $FORK_BASE is missing; create it at the current topic merge first" >&2
-  exit 1
-fi
-
-git fetch upstream main
-git fetch origin
-git branch -f upstream-main upstream/main
-upstream_head=$(git rev-parse upstream/main)
-
-# Rebase unpinned topics onto upstream/main. Pinned topics keep their pushed
-# commits, so a merge brings in their content without a rewrite.
-for topic in "${TOPICS[@]}"; do
-  if is_pinned "$topic"; then
-    if git merge-base --is-ancestor "origin/$topic" "$topic"; then continue; fi
-    echo "sync-upstream: $topic is behind origin/$topic; push it first" >&2
-    exit 1
-  fi
-  git checkout "$topic"
-  git rebase upstream/main
-done
-
-# fork/base is exactly the merge of upstream/main and the topics. Build it on a
-# scratch branch first: a conflict must fail the sync without moving fork/base,
-# because `rebase --onto` below trusts it as the fork commits' exact parent set.
-git checkout -B fork/base-next "$upstream_head"
-# `CHANGELOG.md` gets one bullet appended per topic, so merging two topics
-# conflicts on the shared `### Added` section every time. Resolve it by keeping
-# both sides' bullets, which is what the changelog means.
-resolve_changelog() {
-  python3 - "$1" <<'PY'
-import re, sys
-p = sys.argv[1]
-text = open(p).read()
-pattern = re.compile(r"<<<<<<< [^\n]*\n(.*?)=======\n(.*?)>>>>>>> [^\n]*\n", re.S)
-def keep_both(m):
-    return m.group(1) + m.group(2)
-open(p, "w").write(pattern.sub(keep_both, text))
-PY
-}
-for topic in "${TOPICS[@]}"; do
-  if ! git merge --no-ff "$topic" -m "Merge branch '$topic'"; then
-    if git diff --name-only --diff-filter=U | grep -qx 'CHANGELOG.md'; then
-      # Only the changelog may auto-resolve; any other conflict is a real one.
-      if [ "$(git diff --name-only --diff-filter=U | wc -l)" -eq 1 ]; then
-        resolve_changelog CHANGELOG.md
-        git add CHANGELOG.md
-        git commit -q --no-edit
-        continue
-      fi
-    fi
-    echo "sync-upstream: merging $topic failed; $FORK_BASE is unchanged" >&2
-    git merge --abort 2>/dev/null || true
-    exit 1
+# A dirty checkout usually means work the operator expects this sync to keep.
+git diff --quiet && git diff --cached --quiet \
+  || die "working tree is not clean; commit or stash first"
+for state in MERGE_HEAD rebase-merge rebase-apply; do
+  if [ -e "$(git rev-parse --git-path "$state")" ]; then
+    die "this checkout is in the middle of $state; finish it first"
   fi
 done
+# Candidate merges are commits, so a missing identity fails them one at a time.
+git var GIT_COMMITTER_IDENT >/dev/null 2>&1 \
+  || die "git has no committer identity; set user.name and user.email first"
 
-new_base=$(git rev-parse fork/base-next)
-if [ "$old_base" = "$new_base" ]; then
-  echo "sync-upstream: $FORK_BASE already matches upstream/main and the topics"
-  git branch -f "$FORK_BASE" "$new_base"
-  git checkout "$FORK_DEFAULTS"
+# `--refmap=` drops the remote's default refspec, so the only refs a fetch
+# writes are the private ones below: not `refs/remotes/*`, tags or branches.
+git fetch --no-tags --prune --refmap= upstream \
+  "+refs/heads/main:$FETCH_NS/upstream/main" \
+  || die "fetching upstream/main failed"
+git fetch --no-tags --prune --refmap= origin \
+  "+refs/heads/*:$FETCH_NS/origin/*" \
+  || die "fetching origin failed"
+remote_main=$(git rev-parse --verify -q "$FETCH_NS/origin/main") \
+  || die "origin has no main branch"
+git rev-parse --verify -q "$FETCH_NS/upstream/main" >/dev/null \
+  || die "upstream has no main branch"
+
+# Seed from the published main unless local main only adds commits on top of it
+# (unpushed fork work). Divergence is the operator's to resolve, not ours.
+local_main=$(git rev-parse --verify -q refs/heads/main || true)
+if [ -n "$local_main" ] && [ "$local_main" != "$remote_main" ] && ! is_ancestor "$local_main" "$remote_main"; then
+  is_ancestor "$remote_main" "$local_main" \
+    || die "local main and origin/main have diverged; reconcile main first"
+  seed=$local_main
+  seed_label="local main"
 else
-  # Replay fork-only commits onto the rebuilt base. The old base is the exact
-  # parent set of those commits, so no topic commit is duplicated.
-  git checkout "$FORK_DEFAULTS"
-  git rebase --onto "$new_base" "$old_base" "$FORK_DEFAULTS"
-  git branch -f "$FORK_BASE" "$new_base"
+  seed=$remote_main
+  seed_label="origin/main"
 fi
-git branch -D fork/base-next
 
-# `main` may be checked out in another worktree (the primary checkout), where
-# switching to it fails. Use a dedicated integration branch there, pointing at
-# the same commit `main` would get.
-integration_branch=main
-if [ -n "$(git worktree list --porcelain | awk '/^worktree /{w=$2} /^branch refs\/heads\/main$/{print w}')" ]; then
-  integration_branch=integration-main
-fi
-git checkout -B "$integration_branch" "$FORK_DEFAULTS"
+scratch_root=${TMPDIR:-/tmp}
+[ -d "$scratch_root" ] || die "scratch root $scratch_root does not exist"
+scratch=$(mktemp -d "$scratch_root/sync-upstream.XXXXXX")
+tree=$scratch/tree
+cleanup() {
+  local failed=0
+  if [ -d "$tree" ]; then
+    # Only this sync's own scratch worktree is removed, and only by path. A
+    # blanket `git worktree prune` would also drop other worktrees' metadata.
+    git worktree remove --force "$tree" >/dev/null 2>&1 || failed=1
+  fi
+  rm -rf "$scratch"
+  if [ "$failed" -eq 1 ]; then
+    echo "sync-upstream: cleanup failed; the scratch worktree $tree is gone but git may still list it" >&2
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+mkdir -p "$scratch/tmp"
 
-# The point of the layout: every topic and the fork commits must be reachable
-# from the integration branch. This turns a bad rebase into a failed sync
-# instead of a silently rewritten history.
+# The candidate is a detached HEAD in a scratch worktree, so no branch is
+# created and nothing in this checkout is checked out, rebuilt or replaced.
+git worktree add --quiet --detach "$tree" "$seed" \
+  || die "creating the scratch worktree failed"
+echo "sync-upstream: candidate seeded from $seed_label ($seed)"
+
+merge_into_candidate() {
+  local ref=$1 message=$2 conflicted
+  if git -C "$tree" merge-base --is-ancestor "$ref" HEAD; then return 0; fi
+  if git -C "$tree" merge --no-ff -m "$message" "$ref" >"$scratch/merge.log" 2>&1; then
+    return 0
+  fi
+  conflicted=$(git -C "$tree" diff --name-only --diff-filter=U | tr '\n' ' ')
+  cat "$scratch/merge.log" >&2
+  git -C "$tree" merge --abort >/dev/null 2>&1 || true
+  die "$message does not merge cleanly${conflicted:+ (conflicts: $conflicted)}; resolve it by hand, then rerun"
+}
+
+merge_into_candidate "$FETCH_NS/upstream/main" "upstream/main"
+
+# Topic refs are published review history. Take the fetched tip when the local
+# ref is merely behind it, and refuse to guess when the two histories diverged
+# (a rebased published topic). Local-only commits are merged as they are; the
+# output only ever names the candidate SHA, never a ref that can move later.
 for topic in "${TOPICS[@]}"; do
-  git merge-base --is-ancestor "$topic" "$integration_branch" \
-    || { echo "sync-upstream: $topic is not an ancestor of $integration_branch" >&2; exit 1; }
+  local_sha=$(git rev-parse --verify -q "refs/heads/$topic" || true)
+  published_sha=$(git rev-parse --verify -q "$FETCH_NS/origin/$topic" || true)
+  if [ -z "$local_sha" ] && [ -z "$published_sha" ]; then
+    die "topic $topic is missing locally and on origin"
+  elif [ -z "$local_sha" ] || [ "$local_sha" = "$published_sha" ]; then
+    tip=$published_sha
+  elif [ -z "$published_sha" ]; then
+    tip=$local_sha
+  elif is_ancestor "$local_sha" "$published_sha"; then
+    tip=$published_sha
+    echo "sync-upstream: local $topic is behind origin/$topic; using the published tip"
+  elif is_ancestor "$published_sha" "$local_sha"; then
+    tip=$local_sha
+  else
+    die "topic $topic has diverged from origin/$topic; keep one published history and rerun"
+  fi
+  merge_into_candidate "$tip" "branch '$topic'"
 done
-git merge-base --is-ancestor "$FORK_DEFAULTS" "$integration_branch" \
-  || { echo "sync-upstream: $FORK_DEFAULTS is not an ancestor of $integration_branch" >&2; exit 1; }
 
-bun install --frozen-lockfile
-bun run typecheck
-bun run check:pricing
-# Build before the suite: `test/architecture.test.ts` fails on a stale `dist/`.
-bun run build
-bun test
+# Fork-only refs are additive too. They are normally ancestors already, so this
+# is a no-op on an ordinary sync and only matters for local-only fork work.
+for fork_ref in fork/base fork/defaults; do
+  fork_sha=$(git rev-parse --verify -q "refs/heads/$fork_ref" || true)
+  if [ -n "$fork_sha" ]; then
+    merge_into_candidate "$fork_sha" "branch '$fork_ref'"
+  fi
+done
 
-cat <<'EOF'
+candidate=$(git -C "$tree" rev-parse HEAD)
+is_ancestor "$remote_main" "$candidate" \
+  || die "candidate $candidate is not a descendant of origin/main"
 
-sync-upstream: rebased, merged, and verified.
-Topic branches are fast-forward pushes; the fork branches are rebuilt each sync,
-so `main` needs a lease. Push with:
-  git push origin upstream-main \
-    fix/short-variant-aliases \
-    feat/cache-ttl-env \
-    perf/cache-ttl-and-lean-runtime
-  git push --force-with-lease origin main fork/base fork/defaults
+# Nothing new to verify or publish: the default already contains every input.
+if [ "$candidate" = "$remote_main" ]; then
+  echo "sync-upstream: origin/main already contains upstream/main and every topic; nothing to push"
+  exit 0
+fi
+
+echo "sync-upstream: verifying $candidate in $tree"
+# Every step is its own `&&` link. A negated subshell disables `set -e` inside
+# it, so relying on that would let a failed typecheck or build be followed by a
+# passing `bun test` and report an unverified candidate as verified.
+if ! ( cd "$tree" \
+  && TMPDIR=$scratch/tmp TMP=$scratch/tmp TEMP=$scratch/tmp NODE_DISABLE_COMPILE_CACHE=1 \
+  && export TMPDIR TMP TEMP NODE_DISABLE_COMPILE_CACHE \
+  && bun install --frozen-lockfile \
+  && bun run typecheck \
+  && bun run check:pricing \
+  && bun run build \
+  && require_dist_artifacts \
+  && bun test \
+); then
+  die "verification failed; main, topics, this checkout and its build are unchanged"
+fi
+# The checks ran in a worktree that could have moved; only the commit that was
+# just verified may be named.
+if ! git -C "$tree" diff --quiet || ! git -C "$tree" diff --cached --quiet; then
+  die "verification left tracked changes in the candidate; main and topics are unchanged"
+fi
+[ "$(git -C "$tree" rev-parse HEAD)" = "$candidate" ] \
+  || die "the candidate HEAD moved during verification; main and topics are unchanged"
+is_ancestor "$remote_main" "$candidate" \
+  || die "candidate $candidate is not a descendant of origin/main"
+
+# Only a verified candidate is worth naming. The ref is private and unpublished;
+# it keeps the tested commit reachable after the scratch worktree goes away.
+git update-ref "$CANDIDATE_REF" "$candidate"
+
+cat <<EOF
+
+sync-upstream: verified $candidate (descendant of origin/main $remote_main)
+sync-upstream: no branch moved, no file changed here, nothing pushed
+sync-upstream: tested candidate kept at $CANDIDATE_REF
+sync-upstream: publish with a fast-forward (no force):
+  git push origin $candidate:refs/heads/main
 EOF
+echo "sync-upstream: fork/base and fork/defaults were merged if needed, never rebuilt"

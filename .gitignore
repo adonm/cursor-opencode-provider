@@ -3,6 +3,8 @@ node_modules/
 
 # Build
 dist/
+# A build's private staging directory (scripts/build-atomic.sh); never published.
+.dist.build.*/
 *.tsbuildinfo
 
 # Generated local OpenCode config (absolute paths)

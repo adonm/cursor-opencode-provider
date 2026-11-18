@@ -67,6 +67,20 @@ const PACKAGE_FILES = ["package.json", "bun.lock"].map(name => path.join(ROOT, n
 // Include metadata so a stale host-specific build artifact cannot cross the
 // provider / compatibility-layer boundary unnoticed.
 const DIST_FILES = filesUnder("dist", [".js", ".d.ts", ".json"])
+const DIST_ROOT = path.join(ROOT, "dist")
+// Inputs outside `src/` that change the emitted artifacts.
+const BUILD_INPUTS = ["tsconfig.json"].map(name => path.join(ROOT, name))
+
+/** The `dist/` artifacts the compiler must produce for the current sources. */
+function expectedArtifacts(): string[] {
+  return SOURCE_FILES.flatMap(file => {
+    const relativeSource = path.relative(path.join(ROOT, "src"), file)
+    // Declaration inputs affect the build but are not emitted.
+    if (relativeSource.endsWith(".d.ts")) return []
+    return [".js", ".d.ts"].map(extension =>
+      path.join(DIST_ROOT, relativeSource.replace(/\.ts$/, extension)))
+  })
+}
 
 describe("provider / compatibility-layer architecture", () => {
   test("provider package and executable surfaces never depend on compatibility packages", () => {
@@ -152,22 +166,37 @@ describe("provider / compatibility-layer architecture", () => {
     )).toEqual([])
   })
 
-  test("built output is not older than its sources", () => {
-    const entry = path.join(ROOT, "dist", "index.js")
-    if (!existsSync(entry)) return
-    // A build that predates a source edit silently publishes stale JavaScript to
-    // the package and to `bun test`, so compare the newest input with the entry.
+  test("built output is complete and not older than its inputs", () => {
+    // `dist/` is absent when the suite runs without a build (a plain `bun test`
+    // in a fresh checkout); there is nothing to verify then. Once it exists it
+    // must be the build of these sources: every expected artifact present, no
+    // artifact left over from a removed source, and nothing older than an input.
+    if (!existsSync(DIST_ROOT)) return
+    const missing = expectedArtifacts().filter(file => !existsSync(file)).map(relative)
+    expect(missing, "dist/ is missing compiled artifacts; run bun run build").toEqual([])
+
+    const expected = new Set(expectedArtifacts().map(file => path.normalize(file)))
+    const unexpected = DIST_FILES
+      .filter(file => /\.(?:js|d\.ts)$/.test(file) && !expected.has(path.normalize(file)))
+      .map(relative)
+    expect(unexpected, "dist/ holds artifacts of removed sources; run bun run build").toEqual([])
+
+    // A build that predates an input silently publishes stale JavaScript to the
+    // package and to `bun test`, so compare the newest input with the output.
+    const inputs = [...SOURCE_FILES, ...BUILD_INPUTS]
     let newest = 0
     let newestFile = ""
-    for (const file of SOURCE_FILES) {
+    for (const file of inputs) {
       const { mtimeMs } = statSync(file)
       if (mtimeMs > newest) { newest = mtimeMs; newestFile = relative(file) }
     }
-    const builtAt = statSync(entry).mtimeMs
+    const stale = expectedArtifacts()
+      .filter(file => statSync(file).mtimeMs < newest)
+      .map(relative)
     expect(
-      builtAt < newest,
-      `dist/ is older than src/; run bun run build (${newestFile} is newer than dist/index.js)`,
-    ).toBe(false)
+      stale,
+      `dist/ is older than its inputs; run bun run build (${newestFile} is newer)`,
+    ).toEqual([])
   })
 
   test("static import checks inspect complete declarations and distinguish type imports", () => {
