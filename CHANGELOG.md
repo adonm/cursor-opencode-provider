@@ -8,7 +8,7 @@
 
 ### Added
 
-- OpenCode 2.x models publish lowercase effort variant ids (`#high`, `#max`, `#high-fast`, `#high-1m`) alongside the existing display-label ids, so `provider/model#max` resolves the way other 2.x providers do. A short id appears only when it selects exactly one variant in that entry: a model listing both `No Thinking High` and `High` keeps only those labels. The reserved `default` id is never published, matching the display-label path.
+- Native OpenCode 2.x session runs accept short effort aliases such as `#max` and `#high-fast` when they identify one choice. The picker keeps one entry under its original display label. ACP effort selectors use that label ([#183](https://github.com/oakimov/cursor-opencode-provider/pull/183), @adonm).
 - `CURSOR_PROVIDER_CACHE_TTL_MS` sets how long a persisted conversation snapshot stays usable (24 h upstream, 7 days in this fork). A longer value keeps Cursor's checkpoint reachable across a longer break instead of reseeding the full host transcript on the next turn; abandoned `.tmp` writer files still expire after the fixed 24 h.
 - Progress-only synthetic retries (`shouldContinueProgressOnlyTurn`) are off by default in this fork: a turn that ends with narration and no tool call is left alone unless `CURSOR_PROGRESS_CONTINUATION=1|true|on|yes`. Upstream keeps them on.
 - First-time [review harness setup guide](docs/review-harness.md): supply App credentials or a PAT, run a Cloud Agent or local review, what a published COMMENT review contains, harness architecture (tests, evals, live OpenCode runs, extending scenarios).
@@ -25,6 +25,8 @@
 - Pricing generation uses the live GLM 5.3 model IDs and reads pricing notes by header, so added columns no longer hide documented rates.
 - The fork updater verifies a detached merge candidate and prints a fast-forward push for that exact commit. Failed checks leave the live build and published branches unchanged.
 - Fork builds replace `dist/` in a single directory exchange, avoiding missing or nested builds during a swap.
+- Preserve selectable model and variant ids that collide with object keys in both OpenCode catalogs. Keep their original Cursor ids and parameters, and leave inherited pricing keys unpriced ([#188](https://github.com/oakimov/cursor-opencode-provider/pull/188)).
+- Read model selection metadata from the current cache file and generation, even when two files have the same timestamp ([#188](https://github.com/oakimov/cursor-opencode-provider/pull/188)).
 - Thread listing, the pre-publish thread lookup, and resolution reads no longer call `gh` anonymously. `post`, `threads`, and `complete-resolutions.py` send one credential on every `gh` call: the `--token-env` personal access token when that option is set, otherwise the GitHub App installation token. The named token wins over an ambient `GH_TOKEN` or `GITHUB_TOKEN`.
 - Cancelling `scripts/isolated-check.sh` or `scripts/isolate-run.sh` with TERM, INT, HUP or QUIT sent only to the script's own process now stops the sandboxed command before the archive or staging files are removed, including the `--live` run that holds `CURSOR_API_KEY`; the command used to keep running. A boundary still running `ISOLATE_TERM_GRACE` seconds later (default 10) is killed, and the script exits 128 plus the signal number. `scripts/live-test.sh` also stops OpenCode on QUIT. SIGKILL still cannot be forwarded.
 
