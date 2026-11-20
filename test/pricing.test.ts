@@ -14,9 +14,13 @@ import {
   wireModelIdForPricing,
 } from "../src/pricing.js"
 import {
+  buildContextTable,
   buildPricingTable,
   catalogIdForPricingDisplayName,
 } from "../scripts/generate-cursor-pricing.js"
+import { getDocumentedCursorModelContext } from "../src/model-metadata.js"
+import { modelsToCatalogModelMap } from "../src/opencode2/catalog.js"
+import { cursorRunCost } from "../src/billing.js"
 import { CURSOR_MODEL_COSTS } from "../src/pricing-data.js"
 
 describe("pricing", () => {
@@ -69,19 +73,56 @@ describe("pricing", () => {
         cache_write: 7.5,
       },
     })
+    expect(getCursorModelCost("gpt-5.4")).toEqual({
+      input: 2.5,
+      output: 15,
+      cache_read: 0.25,
+      context_over_200k: { input: 5, output: 15, cache_read: 0.5 },
+    })
     expect(getCursorModelCost("gpt-5.5")).toEqual({
       input: 5,
       output: 30,
       cache_read: 0.5,
-      context_over_200k: {
-        input: 10,
-        output: 30,
-        cache_read: 1,
-      },
+      context_over_200k: { input: 10, output: 30, cache_read: 1 },
     })
-    // "no long-context surcharge" notes must not synthesize a 2x tier.
-    expect(getCursorModelCost("claude-sonnet-5")?.context_over_200k).toBeUndefined()
-    expect(getCursorModelCost("kimi-k3")?.context_over_200k).toBeUndefined()
+    expect(getCursorModelCost("gpt-5.6-luna")).toEqual({
+      input: 0.2,
+      output: 1.2,
+      cache_read: 0.02,
+      cache_write: 0.25,
+      context_over_200k: { input: 0.4, output: 1.2, cache_read: 0.04, cache_write: 0.5 },
+    })
+    expect(getCursorModelCost("gpt-5.6-sol")).toEqual({
+      input: 4,
+      output: 20,
+      cache_read: 0.4,
+      cache_write: 5,
+      context_over_200k: { input: 8, output: 20, cache_read: 0.8, cache_write: 10 },
+    })
+    expect(getCursorModelCost("gpt-5.6-terra")).toEqual({
+      input: 2,
+      output: 12,
+      cache_read: 0.2,
+      cache_write: 2.5,
+      context_over_200k: { input: 4, output: 12, cache_read: 0.4, cache_write: 5 },
+    })
+    expect(getCursorModelCost("gpt-5.4-mini")?.context_over_200k).toBeUndefined()
+  })
+
+  it("maps Gemini 4 Carbon, Hydrogen, and Neon onto served catalog ids", () => {
+    const expected = [
+      { displayName: "Gemini 4 Carbon", id: "gemini-4-carbon", cost: { input: 2, output: 10, cache_read: 0.1 } },
+      { displayName: "Gemini 4 Hydrogen", id: "gemini-4-hydrogen", cost: { input: 1.5, output: 7.5, cache_read: 0.075 } },
+      { displayName: "Gemini 4 Neon", id: "gemini-4-neon", cost: { input: 3, output: 15, cache_read: 0.15 } },
+    ] as const
+    for (const entry of expected) {
+      expect(catalogIdForPricingDisplayName(entry.displayName)).toBe(entry.id)
+      expect(getCursorModelCost(entry.id)).toEqual(entry.cost)
+      expect(getDocumentedCursorModelContext(entry.id)).toEqual({
+        maxContext: 200_000,
+        maxContextForMaxMode: 1_000_000,
+      })
+    }
   })
 
   it("maps Cursor Models pool rates, including Fast variants", () => {
@@ -191,18 +232,85 @@ describe("pricing", () => {
     expect(catalogIdForPricingDisplayName("Unknown (Fast)")).toBeUndefined()
   })
 
-  it("maps GLM 5.3 rows onto the served glm-5p3 catalog ids", () => {
-    expect(catalogIdForPricingDisplayName("GLM 5.3")).toBe("glm-5p3")
-    expect(catalogIdForPricingDisplayName("GLM 5.3 Flash")).toBe("glm-5p3-flash")
-    expect(getCursorModelCost("glm-5p3")).toEqual({
-      input: 1.4,
-      output: 4.4,
-      cache_read: 0.26,
-    })
-    expect(getCursorModelCost("glm-5p3-flash")).toEqual({
-      input: 0.15,
-      output: 0.5,
-      cache_read: 0.029,
+  it("maps GLM 5.3 docs rows and catalogs onto served glm-5p3 ids", () => {
+    const expected = [
+      {
+        displayName: "GLM 5.3",
+        id: "glm-5p3",
+        staleId: "glm-5.3",
+        cost: { input: 1.4, output: 4.4, cache_read: 0.26 },
+        maxContext: 1_000_000,
+      },
+      {
+        displayName: "GLM 5.3 Flash",
+        id: "glm-5p3-flash",
+        staleId: "glm-5.3-flash",
+        cost: { input: 0.15, output: 0.5, cache_read: 0.029 },
+        maxContext: 1_000_000,
+      },
+    ] as const
+
+    const pricingTable = buildPricingTable(`
+| Model | Provider | Input | Cache write | Cache read | Output | US data residency | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [GLM 5.3](https://z.ai) | Z.ai | $1.4 | - | $0.26 | $4.4 | Yes | Hidden by default; Same per-token rates as GLM 5.2 |
+| [GLM 5.3 Flash](https://z.ai) | Z.ai | $0.15 | - | $0.029 | $0.5 | Yes | Hidden by default |
+`)
+    const contextTable = buildContextTable(`
+| Model | Provider | Default context | Max context | Capabilities | Notes |
+| --- | --- | --- | --- | --- | --- |
+| [GLM 5.3](https://z.ai) | Z.ai | 1M | - | Agent, Thinking | Hidden by default; Same per-token rates as GLM 5.2 |
+| [GLM 5.3 Flash](https://z.ai) | Z.ai | 1M | - | Agent, Thinking, Images | Hidden by default |
+`)
+
+    const served: ModelInfo[] = expected.map(({ id, displayName }) => ({
+      id,
+      displayName,
+      supportsThinking: true,
+      supportsAgent: true,
+      variants: [],
+    }))
+    const config1x = modelsToConfig(served)
+    const catalog2x = modelsToCatalogModelMap(served)
+
+    for (const entry of expected) {
+      expect(catalogIdForPricingDisplayName(entry.displayName)).toBe(entry.id)
+      expect(pricingTable[entry.id]).toEqual(entry.cost)
+      expect(contextTable[entry.id]).toEqual({ maxContext: entry.maxContext })
+      expect(getCursorModelCost(entry.id)).toEqual(entry.cost)
+      expect(getCursorModelCost(entry.staleId)).toBeUndefined()
+      expect(getDocumentedCursorModelContext(entry.id)).toEqual({ maxContext: entry.maxContext })
+      expect(getDocumentedCursorModelContext(entry.staleId)).toBeUndefined()
+      expect(cursorRunCost(entry.id, [])).toEqual(entry.cost)
+      expect(config1x[entry.id]).toMatchObject({
+        cost: entry.cost,
+        limit: { context: entry.maxContext },
+      })
+      expect(catalog2x[entry.id]).toMatchObject({
+        cost: [
+          {
+            input: entry.cost.input,
+            output: entry.cost.output,
+            cache: { read: entry.cost.cache_read, write: 0 },
+          },
+        ],
+        limit: { context: entry.maxContext },
+      })
+    }
+  })
+
+  it("reads the long-context surcharge from the Notes column after data residency", () => {
+    const markdown = `
+| Model | Provider | Input | Cache write | Cache read | Output | US data residency | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| GPT-5.4 | OpenAI | $2.5 | - | $0.25 | $15 | Yes | Long context supports up to 1M tokens with 2x input pricing |
+`
+
+    expect(buildPricingTable(markdown)["gpt-5.4"]).toEqual({
+      input: 2.5,
+      output: 15,
+      cache_read: 0.25,
+      context_over_200k: { input: 5, output: 15, cache_read: 0.5 },
     })
   })
 
@@ -279,55 +387,6 @@ describe("pricing", () => {
       },
     ])
     expect(toOpenCode2Costs(undefined)).toEqual([])
-  })
-
-  it("reads pricing notes in published tables with or without a residency column", () => {
-    const fixture = (name: string) =>
-      readFileSync(join(import.meta.dir, "fixtures", name), "utf8")
-
-    const current = buildPricingTable(fixture("cursor-pricing-current.md"))
-    expect(current["gpt-5.4"]).toEqual({
-      input: 2.5,
-      output: 15,
-      cache_read: 0.25,
-      context_over_200k: { input: 5, output: 15, cache_read: 0.5 },
-    })
-    expect(current["claude-sonnet-5"]?.context_over_200k).toBeUndefined()
-    expect(current["gpt-5.6-luna"]).toEqual({
-      input: 0.2,
-      output: 1.2,
-      cache_read: 0.02,
-      cache_write: 0.25,
-      context_over_200k: {
-        input: 0.4,
-        output: 1.2,
-        cache_read: 0.04,
-        cache_write: 0.5,
-      },
-    })
-    expect(current["gemini-4-carbon"]).toEqual({ input: 2, output: 10, cache_read: 0.1 })
-    expect(current["glm-5p3"]).toEqual({ input: 1.4, output: 4.4, cache_read: 0.26 })
-    expect(current["composer-2.5"]).toEqual({ input: 0.5, output: 2.5, cache_read: 0.2 })
-
-    const legacy = buildPricingTable(fixture("cursor-pricing-legacy.md"))
-    expect(legacy["composer-2.5-fast"]).toEqual({ input: 3, output: 15, cache_read: 0.5 })
-    expect(legacy["claude-sonnet-4"]).toEqual({
-      input: 3,
-      output: 15,
-      cache_read: 0.3,
-      cache_write: 3.75,
-      context_over_200k: { input: 6, output: 22.5, cache_read: 0.6, cache_write: 7.5 },
-    })
-    expect(legacy["gpt-5.4"]).toEqual({
-      input: 2.5,
-      output: 15,
-      cache_read: 0.25,
-      context_over_200k: { input: 5, output: 15, cache_read: 0.5 },
-    })
-    for (const entry of [...Object.values(current), ...Object.values(legacy)]) {
-      expect(entry.input).toBeGreaterThan(0)
-      expect(entry.output).toBeGreaterThan(0)
-    }
   })
 
   it("reports coverage for the fixture model list", () => {

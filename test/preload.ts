@@ -48,15 +48,15 @@ delete process.env.OPENCODE_AUTH_CONTENT
 process.env.CURSOR_CLIENT_VERSION = "cli-test"
 
 /**
- * Retention tests assert this fork's default window unless they set an override
+ * Retention tests assert the default age policy unless they set an override
  * themselves. An operator's longer window must not disable their expiry and
  * quarantine branches, including the barriers those tests wait for.
  */
 delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
 
 /**
- * Same for the progress-continuation gate: an operator's opt-out must not silence
- * the continuation cases, and a test that sets it must not leak it onward.
+ * Progress-continuation tests exercise the fork's opt-in gate explicitly.
+ * Clear any inherited setting so default-off cases run without it.
  */
 delete process.env.CURSOR_PROGRESS_CONTINUATION
 

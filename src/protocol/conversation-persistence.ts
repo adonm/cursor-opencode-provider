@@ -820,10 +820,12 @@ function queueDelete(store: ConversationStore, expectedConversationId?: string):
 }
 
 async function recoverQuarantine(filePath: string, now: number, signal: AbortSignal): Promise<void> {
-  for await (const entry of removableDirectoryEntries(quarantineDirectory(filePath))) {
+  const directory = quarantineDirectory(filePath)
+  let newest: { path: string, updatedAt: number } | undefined
+  for await (const entry of removableDirectoryEntries(directory)) {
     signal.throwIfAborted()
     if (!entry.isFile() || !entry.name.endsWith(".snapshot")) continue
-    const candidate = path.join(quarantineDirectory(filePath), entry.name)
+    const candidate = path.join(directory, entry.name)
     let handle
     try {
       handle = await openSnapshot(candidate)
@@ -832,25 +834,46 @@ async function recoverQuarantine(filePath: string, now: number, signal: AbortSig
       throw error
     }
     let status: "invalid" | "expired" | undefined
+    let updatedAt = -Infinity
     try {
       const header = await readConversationCacheHeader(handle, signal)
       if (header.status === "invalid") status = "invalid"
-      else if (header.status === "metadata" && !isFresh(header.value, now)) status = "expired"
+      else if (header.status === "metadata") {
+        if (!isFresh(header.value, now)) status = "expired"
+        else updatedAt = header.value.updatedAt
+      }
     } finally {
       await handle.close()
     }
     signal.throwIfAborted()
-    if (!status) {
-      await link(candidate, filePath).catch((error) => {
-        if (errorCode(error) !== "EEXIST" && errorCode(error) !== "ENOENT") throw error
-      })
+
+    // A wider retention window can make several crash leftovers fresh. Match
+    // the on-demand reader's ordering and keep the newest for promotion.
+    let discarded: string | undefined = candidate
+    if (!status && (!newest || updatedAt > newest.updatedAt)) {
+      discarded = newest?.path
+      newest = { path: candidate, updatedAt }
     }
-    await unlink(candidate).catch((error) => {
+    if (!discarded) continue
+    await unlink(discarded).catch((error) => {
       if (errorCode(error) !== "ENOENT") throw error
     })
     if (status) recordStartupDiscard(path.dirname(path.dirname(filePath)), path.basename(filePath), status)
   }
-  await rmdir(quarantineDirectory(filePath)).catch((error) => {
+
+  if (newest) {
+    signal.throwIfAborted()
+    // A live publication still wins. Leave the candidate for a later pass on
+    // any other link failure.
+    await link(newest.path, filePath).catch((error) => {
+      if (errorCode(error) !== "EEXIST" && errorCode(error) !== "ENOENT") throw error
+    })
+    await unlink(newest.path).catch((error) => {
+      if (errorCode(error) !== "ENOENT") throw error
+    })
+  }
+
+  await rmdir(directory).catch((error) => {
     if (errorCode(error) !== "ENOENT" && errorCode(error) !== "ENOTEMPTY") throw error
   })
 }

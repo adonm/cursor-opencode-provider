@@ -330,11 +330,18 @@ names the shell ID and its record. A detached supervisor owns the command
 group, drains descendant output for up to five seconds after command exit, and
 finalizes cancellations and hard timeouts, allowing the group three seconds
 between TERM and KILL. If the supervisor itself dies (killed, crashed, or lost
-to a reboot), the group is stopped and the record is reported as aborted with
-an unknown exit status. Successful completion preserves deliberately detached
+to a reboot), its startup or running helpers are stopped and a read of the
+stale record reports it as aborted with an unknown exit status. Successful
+completion preserves deliberately detached
 daemons, matching native OpenCode; cancellation, hard timeouts, and failed
 commands stop their command group. The payload runs under the shell selected
-by OpenCode, so bash and zsh syntax retains its native meaning.
+by OpenCode, with the options OpenCode passes it before `-c` (OpenCode 2.2.7+
+runs zsh with `+o nomatch`), so bash and zsh syntax retains its native meaning.
+The supervisor runs in a process group of its own, so the host's signal to the
+launcher's group after the launcher returns does not reach the job (OpenCode
+2.3.0 kills that group 25 commands later). Stop or the host's timeout during
+the foreground window still stops the command: the launcher holds a pipe the
+supervisor watches.
 A collector using the provider's JavaScript runtime
 stores at most 8 MiB of command output and drains excess bytes without writing
 them; the terminal header and completion footer are additional metadata.
@@ -366,7 +373,9 @@ reports its shell ID even when the command has already finished. A background
 request made through OpenCode 2.x's own shell `background` option stays an
 OpenCode background job with the host's completion notice. Supervision
 requires POSIX bash or `setsid`. When this conversation has no usable terminal storage, the unmanaged `nohup`
-fallback requires a POSIX shell. Native Windows PowerShell/`cmd` background
+fallback requires a POSIX shell. With bash or `setsid`, its spawn gets a
+process group of its own. Its soft-background command stays in the
+launcher's group. Native Windows PowerShell/`cmd` background
 wrapping is unsupported; see [Known limitations](#known-limitations).
 Transcript storage is supplied
 separately through `CURSOR_AGENT_TRANSCRIPTS_FOLDER`; the provider neither
@@ -408,9 +417,12 @@ can override `continuation.semanticIdleMs` (or its `softHealthMs` alias).
 If a Run drops immediately after completed tool results, before new output,
 the provider can rebuild from host history containing every observed exec's
 result; Cursor's polls of a background shell's terminal record, which the
-provider answers itself, need none. It sends the completed results once and asks Cursor to continue. A
+provider answers itself, need none. Neither does the provider's bare-status
+refusal of Cursor's request to move a running shell or subagent to the
+background, nor an AwaitShell Cursor ran that slept its whole length or timed
+out with the shell still running. It sends the completed results once and asks Cursor to continue. A
 checkpoint predating those results is never resumed. Missing results, unknown
-activity, a tool call Cursor ran itself or a new interaction keep the failure
+activity, other tool calls Cursor ran itself and new interactions keep the failure
 final. If the rebuilt history would fill more than 80% of the model's context,
 the provider reports a context overflow so the host compacts first.
 A checkpoint received while the completed result drains remains eligible.
@@ -450,12 +462,14 @@ that stall window. The setting does not override OpenCode's own retry limits.
 | `CURSOR_PROVIDER_DEBUG_LOG_MODE` | `trim` (default) keeps the recent tail in place; `rotate` keeps numbered archives. Applies to full and recovery-only logs. See [rotation](docs/cache-log-runbook.md#numbered-rotation). |
 | `CURSOR_PROVIDER_DEBUG_ROTATE_MAX_BYTES` | Rotation threshold in bytes; default `52428800` (50 MiB). Used only in `rotate` mode. |
 | `CURSOR_PROVIDER_DEBUG_ROTATE_BACKUPS` | Number of archives to retain, from `1` to `100`; default `5`. `.1` is newest. Used only in `rotate` mode. |
-| `CURSOR_PROVIDER_CACHE_TTL_MS` | Retention for persisted conversation snapshots in milliseconds; default `604800000` (7 days) in this fork, `86400000` (24 h) upstream. A positive integer keeps the snapshot warm for that long, so a longer break resumes from Cursor's checkpoint instead of reseeding the host transcript. Empty, `0`, negative, non-numeric, or unsafe values fall back to the default. Abandoned `.tmp` writer files still expire after the fixed 24 h. Both OpenCode majors read it. |
+| `CURSOR_PROVIDER_CACHE_TTL_MS` | Retention for persisted conversation snapshots in milliseconds (default `604800000`, 7 days in this fork; 24 h upstream). Accepts a positive safe integer in decimal digits with optional surrounding whitespace. Other values use the default. Both OpenCode majors read it. Abandoned `.tmp` writer files still expire after the fixed 24 h. |
 | `CURSOR_AGENT_TRANSCRIPTS_FOLDER` | Optional folder containing past-chat transcripts, advertised to Cursor on OpenCode 1.x and 2.x. Sent only if it is an existing directory; unset, empty, missing, non-directory, or unstatable paths are omitted. Relative paths resolve against the workspace. The provider does not create the folder or write transcripts. |
 | `CURSOR_OPENCODE2_DEV_ENTRY` | **Local OpenCode 2.x only.** Absolute path to a built entry file (usually `dist/index.js`). Rewrites the AI SDK package to `aisdk:file://…` so the daemon imports your local build instead of `npm install`-ing the published package. Export it **before** `opencode2 service start`, then restart after rebuilds. Unset in production. See [OpenCode 2.x local clone](docs/opencode-2.md#from-a-local-clone-cursor_opencode2_dev_entry). |
 | `CURSOR_OPENCODE2_TODOS` | **OpenCode 2.x only.** Set to `1` or `true` to register plugin-owned `todowrite`/`todoread` (in-memory; no TUI sidebar). Off by default. OpenCode 1.x still uses the host builtin. |
 | `XDG_CACHE_HOME` | Base for native OpenCode cache (`$XDG_CACHE_HOME/opencode/`) when no explicit `cacheDir` or structural host path bridge is installed |
 | `XDG_DATA_HOME` | When set, OpenCode `auth.json` is read from `$XDG_DATA_HOME/opencode/` instead of `~/.local/share/opencode/` |
+
+Set the same `CURSOR_PROVIDER_CACHE_TTL_MS` in every OpenCode process that shares a cache directory, including the daemon. A process with a shorter window can remove snapshots the others could still restore. A longer window keeps more snapshots eligible for reuse and can increase disk usage. A retained checkpoint can still require a history rebuild if Cursor cannot resume it.
 
 Set `CURSOR_AGENT_TRANSCRIPTS_FOLDER` before starting OpenCode (or its daemon). The folder is checked when a conversation's RequestContext base is first built and stays frozen for that conversation; start a new session after changing the setting.
 

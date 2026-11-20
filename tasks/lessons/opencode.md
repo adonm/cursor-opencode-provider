@@ -61,6 +61,38 @@ These are failure lessons shared by both hosts, not a replacement for
 - **Aliases need execution mappings and capability flags.** Wording alone did
   not prevent native web/resource collisions. Unknown underscore names are not
   MCP server ids (`resolveToolServerIdentity`, `test/tools.test.ts`).
+  Producer-local uniqueness also misses host control ids. PR #183's short
+  effort aliases admitted the schema-valid value `default`, which both hosts
+  interpret as no explicit variant. Its equal-settings assertions never
+  selected that id through the host. Keep the sentinel unavailable while
+  retaining the original selectable label (`host's default sentinel` in
+  `test/model-selection-review.test.ts`); distinguish synthetic metadata from
+  an observed Cursor catalog entry.
+  A review that passes a tuple directly to the provider resolver still has not
+  tested the host's id selector. Harness-only tests are absent from an older
+  subject archive, so run trusted contract checks against that subject before
+  its own suite (`scripts/review-model-contracts.mjs`,
+  `test/review-model-contracts.test.ts`). Keep that synthetic invariant check
+  distinct from a native host observation and from new defect discovery.
+  The resumed #183 review found a separate pre-existing loss: accepted model
+  ids and labels equal to `__proto__` disappeared from object-backed catalogs.
+  Agreement between the two catalogs was not an independent oracle. Derive
+  expected choices from discovery input and exercise accepted names, values,
+  partitions and ordering. Prototype-free dictionaries kept the bytes but a
+  native 1.x run still dropped the raw variant key and failed with prototype
+  model ids. Escape emitted keys, retain the wire id, and preserve ordinary
+  `constructor`/`toString` variant labels that both hosts already consume
+  (`preserves accepted metadata` in `test/model-selection-review.test.ts`).
+  The next bot review left those losses as baseline diagnostics and a full-suite
+  selection failure undiagnosed after isolated reruns passed. Baseline origin
+  does not decide scope; keep failures attached to a causal assessment
+  (`review evidence gate` in `test/review-publish.test.ts`). A deterministic
+  follow-up exposed timestamp-only model caching across distinct roots and
+  atomic replacements. Key metadata by file identity/generation, return the
+  request's own snapshot, and verify the consumed Run independently of suite
+  order (`test/model-selection-run.test.ts`,
+  `scripts/review-model-cache-contract.mjs`). That counterexample does not
+  establish the cause of the earlier bot run without its execution trace.
 - **Dynamic discovery must include invocation identity.** The inner schema hid
   required outer `namespace`/`toolName`; server-side wrapper failures may appear
   only in display completion (`test/dynamic-catalog.test.ts`).
@@ -209,6 +241,18 @@ These are failure lessons shared by both hosts, not a replacement for
   holds the outcome (`historyCoverage`). A fixture must advertise the tool
   whose answer it tests: without `read`, the provider refused the read as
   unavailable, and that refusal posed as a missing-target answer.
+  Exempting reads still refused Runs over Cursor's own traffic: a soft-denied
+  `force_background_shell_args` (sent to deliver a queued host note) counted as
+  a host exec without a result, and an AwaitShell no poll named marked the Run
+  opaque ([#182](https://github.com/oakimov/cursor-opencode-provider/issues/182),
+  [#189](https://github.com/oakimov/cursor-opencode-provider/issues/189)). A
+  bare-status refusal of a request about a call already sent is an answer; a
+  refusal the model reads is not. Account for a server-side call only from a
+  strict wire match of what its result told the model, never from its variant
+  name. An AwaitShell completion must also match the start's arguments and
+  the result must belong to the requested task (`cursorWaitArgs`;
+  `test/replay-safety.test.ts`, `soft-denied-*` and `await-*` in
+  `test/run-error-host.test.ts`).
   A failed replacement open moves a Run's injected notes into the deferred
   store before retrying. The rebuild guard must recognize that retained copy
   too: recomputing recovery from the emptied injection registry otherwise
@@ -627,7 +671,10 @@ These are failure lessons shared by both hosts, not a replacement for
 - **Atomic replacement does not prevent lost writers.** Partition by host
   session; gzip protobuf bytes rather than base64 JSON. Revalidate cleanup
   candidates, expire loaded sessions too, and avoid decoded snapshot duplicates
-  (`test/conversation-maintenance.test.ts`).
+  (`test/conversation-maintenance.test.ts`). In #184 a longer retention window
+  made multiple quarantined generations fresh. Recover by newest persisted
+  timestamp, as on-demand readers do. The first directory entry can be older
+  than a replacement it would otherwise cause maintenance to discard.
 - **A failed save leaves a stale snapshot, not an old-but-valid one.** The
   atomic rename keeps the previous file, whose checkpoint lacks the turns since;
   an in-memory "unsaved" mark is lost on restart or record eviction (#135).
@@ -674,13 +721,31 @@ These are failure lessons shared by both hosts, not a replacement for
   could block after reaping a child (`test/terminal-runner.test.ts`).
 - **Force signal gaps.** A child inherited traps before exec; a cancel arrived
   before `$!`. Latch cancellation, use marker-before-signal coordination and
-  one-way stop state; instrumentation must not hide the race.
+  one-way stop state; instrumentation must not hide the race. For the launcher
+  handoff, force EOF before the payload starts as well as after it starts but
+  before `ready`. Both paths must publish an aborted record and reap their
+  helpers (`test/terminal-runner.test.ts`).
 - **Missing completion does not mean unstarted.** Startup and cleanup need one
   atomic claim; repeated release may remove only truly unstarted jobs
   (`releaseUnstartedTerminal`).
 - **Detached helpers need bounded owner-death cleanup.** A FIFO detects even
-  SIGKILL; descendants can hold output open forever. Disarm on success so an
-  explicitly detached daemon survives (`test/terminal-runner.test.ts`).
+  SIGKILL; descendants can hold output open forever. Make long idle waits exit
+  on EOF. Give Bash's timed reads their own FIFO. Sharing the lifeline left the
+  group's blocking reader waiting on macOS after the supervisor died.
+  Open the group's lifeline and the collector's input in launch redirections
+  before closing the inherited bootstrap ends. A peer that dies before it
+  enters its script must produce EOF rather than strand the other side in
+  `open` (`releases all startup pipes` in `test/terminal-runner.test.ts`).
+  If a group leader dies before reporting, close the lifeline
+  so the in-group watcher stops the surviving payload. Normal completion still
+  disarms it so an explicitly detached daemon survives. Assert cleanup using
+  captured job-owned PIDs (`test/terminal-runner.test.ts`). The review harness
+  now tests both owner deaths against archived code independently of its tests.
+  Record the probe's detached session before waiting for launcher readiness.
+  On cancellation, stop that session before removing its scratch files.
+  Compare finalization and payload shutdown separately: #192 added a delay to
+  record finalization while exposing an existing surviving-payload bug
+  (`scripts/review-supervisor-contracts.mjs`).
 - **A PID is not ownership.** Keep the group leader alive through drain and
   verify identity before signalling either a child group or its supervisor.
 - **Prove streaming and bounds while running.** BSD head/dd buffered output;
@@ -759,7 +824,9 @@ These are failure lessons shared by both hosts, not a replacement for
   Bind the model snapshot to the Run's cache root and file generation and
   verify the selected max-mode bit on the request (`test/model-selection-run.test.ts`).
 - **Inspect generator inputs before changing mappings.** Pricing and model
-  metadata came from distinct markdown endpoints. Run the live pricing gate
+  metadata came from distinct markdown endpoints. An added US data residency
+  column hid the long-context surcharge. Read Notes by header and test a row
+  whose note changes the rates (`test/pricing.test.ts`). Run the live pricing gate
   before a bump; the v0.6.4 failure forced a retag ([release gate](../../AGENTS.md#hard-stop--release--version-bump--tag-gate-non-optional)).
 - **Make tests capable of failing.** Type guards once sat outside tsc's include;
   root ignored permission fixtures. Use real usages, deterministic faults and
@@ -878,9 +945,13 @@ These are failure lessons shared by both hosts, not a replacement for
   separately from subject failures. An Ubuntu-registered mirror on an
   independent domain preserves APT's signed metadata/package validation;
   reject partial index updates rather than installing against stale indexes.
+  A later #188 run could not reach the pinned mirror over IPv4 while IPv6 was
+  unreachable. A single independent mirror still has one failure point;
+  supply several registered mirrors for APT's native file failover, with
+  bounded transport timeouts/retries and the same fail-closed index check.
   Share that bootstrap between merge and head coverage jobs, including when
-  the checked-out head predates a helper script (`uses the same signed Ubuntu
-  mirror setup` in `test/review-scripts.test.ts`).
+  the checked-out head predates a helper script (`shares independent signed
+  Ubuntu mirrors` in `test/review-scripts.test.ts`).
 - **A green suite is not a branch audit.** A review missed a generator whose
   failed refresh retained the state that made the next invocation skip its
   promised retry, and it also promoted observations and policy preferences
@@ -890,7 +961,28 @@ These are failure lessons shared by both hosts, not a replacement for
   An `adversarial` label and a well-formed private ledger only attest to that
   work. Measure detection with the manual pairs in `eval/review/`, including
   held-out cases and false-positive controls, and say so when no fresh
-  reviewer ran. Repair the review harness when that is the requested target,
+  reviewer ran. PR #187's deterministic retention and publication regressions
+  establish those mechanics only; keep instruction changes experimental until
+  matched reviewer runs establish detection and false-positive results.
+  A head defect can also disappear at adjudication when a separate revision's
+  repair is used to dismiss it. Bind each candidate's assessment to the reviewed
+  head and retain separate fixes in the public result; otherwise an
+  `operational` label can erase a reproduced violation (`review evidence gate`
+  regressions).
+  Stopping after those two known cases left the requested review incomplete.
+  The expanded model probes and retention boundary/inheritance probes use
+  independently defined postconditions and broken/fixed controls. Keep their
+  diagnostic failures while collecting the other independent checks and unit
+  suite; fail-fast contract insertion had suppressed that evidence
+  (`test/review-model-contracts.test.ts`, `test/review-retention-contracts.test.ts`).
+  The #188 post-mortem found that tuple preservation missed wrong alias
+  selections and one-snapshot expiry tests missed loss of a newer quarantine
+  generation. Exercise the selector and restart with multiple eligible records.
+  Compare completed runs by failing fixture as well as diagnostic. An earlier
+  known failure in a truncated log cannot explain later work that never ran.
+  Keep validating both host projections after a known failure. Early exit on
+  1.x can conceal a different violation in 2.x for the same fixture.
+  Repair the review harness when that is the requested target,
   using the reviewed defect as evaluation evidence rather than turning the
   repair into a patch to the subject (`docs/pr-review.md`).
   The #166 audit then rendered a synthetic clean verdict with only `diff` and
@@ -954,8 +1046,14 @@ These are failure lessons shared by both hosts, not a replacement for
   reviewer's existing summary current instead of leaving an earlier clean
   post beside a newer contradictory one. Bind the replacement to the existing
   review id, author and body digest, then verify its body at that same id;
-  summary edits retain the original commit/inline anchors, so new findings
-  need source locations in the summary (`review summary updates` regressions).
+  Summary-only edits then flattened anchored findings into prose: the updated
+  #183/#184 payloads had empty inline arrays. Keep current-diff findings as
+  native code comments, bind existing comment snapshots, and track/read back
+  their anchors separately from the summary receipt. A submitted review's
+  body edit cannot create a thread. Recover partial native actions without
+  duplicating the summary or treating a missing response as an unsent comment
+  (`review summary updates` regressions). Retain older preview semantics so
+  their exact approval cannot silently authorize new native writes.
 - **A code verdict is not a command exit status.** A review labelled an isolated
   check passed while reporting its nonzero exit and failing self-tests. The
   result model also rejected clean code verdicts with established baseline or

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test"
+import { spawn } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
@@ -42,6 +43,26 @@ async function launch(terminal: ManagedTerminal, shell = "/bin/sh", env = proces
   const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
   return { stdout, stderr, code }
 }
+/**
+ * Run the launcher as the leader of its own process group, as both OpenCode majors run a shell
+ * command, so a test can signal that group the way the host does.
+ */
+function launchAsGroupLeader(terminal: ManagedTerminal, shell = "/bin/sh") {
+  const child = spawn(shell, ["-c", terminal.command], { detached: true, stdio: ["ignore", "pipe", "pipe"] })
+  let stdout = ""
+  child.stdout!.on("data", (chunk: Buffer) => { stdout += chunk.toString() })
+  child.stderr!.resume()
+  const exited = new Promise<{ stdout: string; code: number | null }>((resolve) => {
+    child.on("close", (code) => resolve({ stdout, code }))
+  })
+  return { pid: child.pid!, exited, output: () => stdout }
+}
+/** Signal a process group, which may already be empty. */
+function signalGroup(pgid: number, signal: NodeJS.Signals) {
+  try { process.kill(-pgid, signal) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH" && (error as NodeJS.ErrnoException).code !== "EPERM") throw error
+  }
+}
 async function waitFor(predicate: () => boolean, ms = 6000) {
   const end = Date.now() + ms
   while (!predicate() && Date.now() < end) await Bun.sleep(25)
@@ -50,6 +71,18 @@ async function waitFor(predicate: () => boolean, ms = 6000) {
 const processesFor = (terminal: ManagedTerminal) =>
   processTable().filter(entry => entry.command.includes(terminal.directory)).map(entry => `${entry.pid} ${entry.command}`)
 const alive = (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } }
+function trackSupervisorNap(terminal: ManagedTerminal) {
+  const runner = path.join(terminal.directory, "runner.sh")
+  const script = fs.readFileSync(runner, "utf8")
+  const anchor = 'napper=$!\n'
+  expect(script.split(anchor)).toHaveLength(2)
+  fs.writeFileSync(runner, script.replace(anchor, `${anchor}  [ "$1" = 0.1 ] || printf '%s\\n' "$napper" >"$job/test-nap"\n`))
+  return async () => {
+    const file = path.join(terminal.directory, "test-nap")
+    expect(await waitFor(() => fs.existsSync(file) && fs.statSync(file).size > 0)).toBe(true)
+    return Number(fs.readFileSync(file, "utf8"))
+  }
+}
 async function waitDone(terminal: ManagedTerminal) {
   const end = Date.now() + 7000
   while (!fs.existsSync(path.join(terminal.directory, "done")) && Date.now() < end) await Bun.sleep(25)
@@ -83,16 +116,35 @@ describe("managed terminal supervisor", () => {
     // A TERM that reaches a just-forked sleep before it execs is swallowed by
     // the trap it inherited, exactly as if the sleep ignored TERM.
     const bin = fs.mkdtempSync(path.join(root, "bin-"))
-    fs.writeFileSync(path.join(bin, "sleep"), `#!/bin/sh\ntrap '' TERM\nexec ${JSON.stringify(Bun.which("sleep"))} "$@"\n`, { mode: 0o755 })
-    const deadlines = () => processTable().filter(entry => /sleep (10|30|60)$/.test(entry.command)).map(entry => entry.pid)
-    const before = new Set(deadlines())
-    const terminal = job("true", { timeoutMs: 30_000, hardTimeoutMs: 60_000 })
-    const started = Date.now()
-    const launched = await launch(terminal, "/bin/sh", { ...process.env, PATH: `${bin}:${process.env.PATH}` })
-    expect(launched.stdout).toBe("\n__CURSOR_SHELL_EXIT__0\n")
-    expect(Date.now() - started).toBeLessThan(5000)
-    expect(await waitDone(terminal)).toContain("exit_code: 0")
-    expect(await waitFor(() => deadlines().every(pid => before.has(pid)), 2000)).toBe(true)
+    fs.writeFileSync(path.join(bin, "sleep"), [
+      "#!/bin/sh",
+      "trap '' TERM",
+      `case "$1" in 10|30|60) printf '%s\\n' "$$" >${JSON.stringify(root)}/deadline-"$1".pid ;; esac`,
+      `exec ${JSON.stringify(Bun.which("sleep"))} "$@"`,
+      "",
+    ].join("\n"), { mode: 0o755 })
+    const terminal = job("while [ ! -s deadline-30.pid ] || [ ! -s deadline-60.pid ]; do sleep 0.01; done", { timeoutMs: 30_000, hardTimeoutMs: 60_000 })
+    const runner = path.join(terminal.directory, "runner.sh")
+    const script = fs.readFileSync(runner, "utf8")
+    const ready = `printf '%s\\n' "$supervisor" >"$job/ready"`
+    expect(script.split(ready)).toHaveLength(2)
+    fs.writeFileSync(runner, script.replace(ready, `while [ ! -s deadline-10.pid ]; do sleep 0.01; done\n${ready}`))
+    const deadlines = () => [10, 30, 60].flatMap(seconds => {
+      const file = path.join(root, `deadline-${seconds}.pid`)
+      return fs.existsSync(file) ? [Number(fs.readFileSync(file, "utf8"))].filter(pid => pid > 1) : []
+    })
+    try {
+      const started = Date.now()
+      const launched = await launch(terminal, "/bin/sh", { ...process.env, PATH: `${bin}:${process.env.PATH}` })
+      expect(launched.stdout).toBe("\n__CURSOR_SHELL_EXIT__0\n")
+      expect(Date.now() - started).toBeLessThan(5000)
+      expect(await waitDone(terminal)).toContain("exit_code: 0")
+      const pids = deadlines()
+      expect(pids).toHaveLength(3)
+      expect(await waitFor(() => pids.every(pid => !alive(pid)), 2000)).toBe(true)
+    } finally {
+      for (const pid of deadlines()) if (alive(pid)) process.kill(pid, "SIGKILL")
+    }
   }, 15_000)
 
   it("releases an unstarted job even when its terminal record or index is already missing", () => {
@@ -253,10 +305,10 @@ describe("managed terminal supervisor", () => {
     // that real exit without introducing an I/O error or printing metadata.
     fs.writeFileSync(path.join(terminal.directory, "collector.cjs"), `
 const fs = require("node:fs")
-const [job, terminal] = process.argv.slice(2)
+const [, terminal] = process.argv.slice(2)
 process.on("SIGTERM", () => process.exit(1))
 const fd = fs.openSync(terminal, "a")
-fs.createReadStream(job + "/pipe").on("data", chunk => fs.writeSync(fd, chunk))
+process.stdin.on("data", chunk => fs.writeSync(fd, chunk))
 `)
     const launched = await launch(terminal)
     const supervisor = Number(/__CURSOR_BACKGROUND_SHELL__\d+:(\d+):/.exec(launched.stdout)![1])
@@ -491,6 +543,77 @@ fs.createReadStream(job + "/pipe").on("data", chunk => fs.writeSync(fd, chunk))
     expect(await waitDone(terminal)).toContain("exit_code: 0")
   }, 15_000)
 
+  it("runs no program while a command runs when bash 4.2+ supervises it", async () => {
+    const bash = Bun.which("bash")
+    if (!bash) return
+    const version = Bun.spawnSync([bash, "-c", "echo $(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] ))"]).stdout.toString()
+    if (Number(version) < 402) return
+    // Every program the supervisor runs by name logs itself first.
+    const bin = fs.mkdtempSync(path.join(root, "bin-"))
+    const log = path.join(root, "programs.log")
+    for (const name of ["sleep", "date", "cat", "wc", "tr", "rm", "mkfifo", "setsid", "head", "tail", "ps"]) {
+      const real = Bun.which(name)
+      if (real) fs.writeFileSync(path.join(bin, name), `#!/bin/sh\nprintf '%s\\n' "${name} $*" >>${JSON.stringify(log)}\nexec ${JSON.stringify(real)} "$@"\n`, { mode: 0o755 })
+    }
+    const terminal = job(`${JSON.stringify(Bun.which("sleep"))} 6`, { backgroundSpawn: true })
+    const readNap = trackSupervisorNap(terminal)
+    await launch(terminal, "/bin/sh", { ...process.env, PATH: `${bin}:${process.env.PATH}` })
+    const programs = () => fs.readFileSync(log, "utf8").split("\n").filter(Boolean)
+    // Wait for the first idle nap without requiring an external sleep.
+    await readNap()
+    const settled = programs().length
+    await Bun.sleep(3000)
+    expect(programs().slice(settled)).toEqual([])
+    const record = fs.readFileSync(terminal.file, "utf8")
+    expect(Number(/running_for_ms: (\d+)/.exec(record)![1])).toBeGreaterThanOrEqual(2000)
+    expect(await waitDone(terminal)).toContain("exit_code: 0")
+  }, 20_000)
+
+  it("wakes the supervisor's nap but leaves a PID it no longer owns alone", async () => {
+    if (!fs.existsSync("/proc/self/stat")) return
+    const terminal = createManagedTerminal({ command: "true", workingDirectory: root, timeoutMs: 0, timeoutBehavior: 0, backgroundSpawn: true }, root)
+    const runner = fs.readFileSync(path.join(terminal.directory, "runner.sh"), "utf8")
+    const isChild = /\nis_supervisor_child\(\) \{\n[\s\S]*?\n\}\n/.exec(runner)![0]
+    const wake = /\nwake\(\) \{\n[\s\S]*?\n\}\n/.exec(runner)![0]
+    const stranger = Bun.spawn(["sleep", "30"])
+    try {
+      const proc = Bun.spawn(["/bin/sh", "-c", [
+        "supervisor=$$", isChild, wake,
+        `napper=${stranger.pid}; wake`,
+        `sh -c 'printf "%s\\n" "nap ) worker" >/proc/self/comm; : >"$1"; kill -STOP "$$"' sh ${JSON.stringify(path.join(root, "nap-ready"))} & napper=$!`,
+        `while [ ! -f ${JSON.stringify(path.join(root, "nap-ready"))} ]; do sleep 0.01; done`,
+        'wake; sleep 0.1; if kill -0 "$napper" 2>/dev/null; then kill -KILL "$napper"; wait "$napper"; echo unwoken; else wait "$napper"; echo "own=$?"; fi',
+      ].join("\n")], { stdout: "pipe", stderr: "pipe" })
+      expect((await new Response(proc.stdout).text()).trim()).toBe("own=137")
+      expect(await proc.exited).toBe(0)
+      expect(alive(stranger.pid)).toBe(true)
+    } finally {
+      stranger.kill("SIGKILL")
+      releaseUnstartedTerminal(terminal.directory)
+    }
+  })
+
+  // The payload waits for the injected gap and the gap ends only after the
+  // supervisor has handled the payload's exit signal.
+  it.each([
+    ["before the nap checks the command again", 'napper=$!\n', (gap: string) => `napper=$!\n  ${gap}\n`],
+    ["after that check", 'if "$2"; then wait "$napper"', (gap: string) => `if "$2"; then ${gap}; wait "$napper"`],
+  ])("finishes a command that exits just %s, before the long nap's wait", async (_name, anchor, gapped) => {
+    const terminal = job("while [ ! -f test-nap-gap ]; do sleep 0.01; done", { backgroundSpawn: true })
+    const runner = path.join(terminal.directory, "runner.sh")
+    const script = fs.readFileSync(runner, "utf8")
+    expect(script.split(anchor)).toHaveLength(2)
+    const signal = "trap wake USR1"
+    expect(script.split(signal)).toHaveLength(2)
+    const held = script.replace(signal, `trap 'wake; if [ -f "$job/command-exit" ]; then : >"$job/test-notified"; fi' USR1`)
+      .replace(anchor, gapped('[ "$1" = 0.1 ] || { : >"$workdir/test-nap-gap"; while [ ! -f "$job/test-notified" ]; do sleep 0.01; done; }'))
+    fs.writeFileSync(runner, held)
+    const started = Date.now()
+    await launch(terminal)
+    expect(await waitDone(terminal)).toContain("exit_code: 0")
+    expect(Date.now() - started).toBeLessThan(6000)
+  }, 15_000)
+
   it("soft-hands off to the same terminal and captures descendant output without losing the exit code", async () => {
     const terminal = job("(sleep 0.5; printf tail) & printf front; exit 3", { timeoutMs: 100 })
     expect((await launch(terminal)).stdout).toContain("__CURSOR_SHELL_BACKGROUND__")
@@ -608,18 +731,28 @@ fs.createReadStream(job + "/pipe").on("data", chunk => fs.writeSync(fd, chunk))
   })
 
   it("stops the command group and its watchdog when the supervisor is killed, and reports the record as aborted", async () => {
-    const deadlines = () => processTable().filter(entry => /sleep 86400$/.test(entry.command)).map(entry => entry.pid)
-    const before = new Set(deadlines())
     const terminal = job("sleep 30 & echo $! > child.pid; wait", { backgroundSpawn: true, hardTimeoutMs: 86_400_000 })
+    const readNap = trackSupervisorNap(terminal)
     const launched = await launch(terminal)
     const supervisor = Number(/__CURSOR_BACKGROUND_SHELL__\d+:(\d+):/.exec(launched.stdout)![1])
     expect(await waitFor(() => fs.existsSync(path.join(root, "child.pid")))).toBe(true)
-    expect(await waitFor(() => deadlines().some(pid => !before.has(pid)))).toBe(true)
     const child = Number(fs.readFileSync(path.join(root, "child.pid"), "utf8"))
-    process.kill(supervisor, "SIGKILL")
-    expect(await waitFor(() => !alive(child))).toBe(true)
-    expect(await waitFor(() => processesFor(terminal).length === 0)).toBe(true)
-    expect(await waitFor(() => deadlines().every(pid => before.has(pid)))).toBe(true)
+    let deadline: number | undefined
+    expect(await waitFor(() => {
+      const entries = processTable()
+      const helpers = new Set(entries.filter(entry => entry.ppid === supervisor).map(entry => entry.pid))
+      deadline = entries.find(entry => helpers.has(entry.ppid) && /sleep 86400$/.test(entry.command))?.pid
+      return deadline !== undefined
+    })).toBe(true)
+    const nap = await readNap()
+    try {
+      expect(processTable().some(entry => entry.pid === nap && entry.ppid === supervisor)).toBe(true)
+      process.kill(supervisor, "SIGKILL")
+      expect(await waitFor(() => !alive(nap) && !alive(child) && !alive(deadline!))).toBe(true)
+      expect(await waitFor(() => processesFor(terminal).length === 0)).toBe(true)
+    } finally {
+      for (const pid of [nap, child, deadline!]) if (alive(pid)) process.kill(pid, "SIGKILL")
+    }
     const stale = new Date(Date.now() - 60_000)
     fs.utimesSync(terminal.file, stale, stale)
     const frames = await runtimeExecMessages({ id: 1, read_args: { path: terminal.file } }, { env: { project_folder: root } }, true)
@@ -627,7 +760,68 @@ fs.createReadStream(job + "/pipe").on("data", chunk => fs.writeSync(fd, chunk))
     expect(read.content).toContain("status: aborted")
     expect(read.content).toContain("exit_code: unknown")
     jobs.pop()
-  })
+  }, 15_000)
+
+  it.each(["before the group forks", "before the group starts the payload"] as const)(
+    "releases all startup pipes when the supervisor is killed %s",
+    async (stage) => {
+      const terminal = job("touch should-not-run", { backgroundSpawn: true })
+      const beforeFork = stage === "before the group forks"
+      const script = path.join(terminal.directory, beforeFork ? "runner.sh" : "group.sh")
+      const source = fs.readFileSync(script, "utf8")
+      const gate = beforeFork ? 'collector=$!' : "trap ':' TERM INT HUP"
+      expect(source.split(gate)).toHaveLength(2)
+      fs.writeFileSync(script, source.replace(gate, gate + '\n: >"$job/test-held"\n'
+        + 'while [ ! -f "$job/test-release" ]; do sleep 0.01; done'))
+      const launcher = launchAsGroupLeader(terminal)
+      try {
+        expect(await waitFor(() => fs.existsSync(path.join(terminal.directory, "test-held")))).toBe(true)
+        expect(processesFor(terminal).some(line => line.includes("collector.cjs"))).toBe(true)
+        const supervisor = Number(/\npid: (\d+)\n/.exec(fs.readFileSync(terminal.file, "utf8"))?.[1])
+        expect(supervisor).toBeGreaterThan(1)
+        process.kill(supervisor, "SIGKILL")
+        expect(await waitFor(() => !alive(supervisor))).toBe(true)
+        fs.writeFileSync(path.join(terminal.directory, "test-release"), "")
+        const result = await launcher.exited
+        expect(result.stdout).not.toContain("__CURSOR_BACKGROUND_SHELL__")
+        expect(result.code).toBe(1)
+        expect(await waitFor(() => processesFor(terminal).length === 0, 3000)).toBe(true)
+        expect(fs.existsSync(path.join(root, "should-not-run"))).toBe(false)
+        const stale = new Date(Date.now() - 60_000)
+        fs.utimesSync(terminal.file, stale, stale)
+        const frames = await runtimeExecMessages({ id: 1, read_args: { path: terminal.file } }, { env: { project_folder: root } }, true)
+        const reply = decodeMessageSparse<{ exec_client_message: { read_result: { success: { content: string } } } }>(
+          "AgentClientMessage", frames![0]!,
+        )
+        const resultRead = reply.exec_client_message.read_result.success
+        expect(resultRead.content).toContain("status: aborted")
+        expect(resultRead.content).toContain("exit_code: unknown")
+      } finally {
+        fs.writeFileSync(path.join(terminal.directory, "test-release"), "")
+        signalGroup(launcher.pid, "SIGKILL")
+        await launcher.exited
+      }
+    }, 20_000)
+
+  it("finalizes a lost group leader promptly and stops its surviving payload", async () => {
+    const terminal = job('printf "%s\\n" "$$" > payload.pid; exec sleep 30', { backgroundSpawn: true })
+    const readNap = trackSupervisorNap(terminal)
+    const launched = await launch(terminal)
+    const supervisor = Number(/__CURSOR_BACKGROUND_SHELL__\d+:(\d+):/.exec(launched.stdout)![1])
+    const leader = processTable().find(entry => entry.ppid === supervisor && entry.command.includes(`${terminal.directory}/group.sh`))
+    expect(leader).toBeDefined()
+    const payloadFile = path.join(root, "payload.pid")
+    expect(await waitFor(() => fs.existsSync(payloadFile) && fs.statSync(payloadFile).size > 0)).toBe(true)
+    const payload = Number(fs.readFileSync(payloadFile, "utf8"))
+    try {
+      await readNap()
+      process.kill(leader!.pid, "SIGKILL")
+      expect(await waitDone(terminal)).toContain("exit_code: 137")
+      expect(await waitFor(() => !alive(payload), 2000)).toBe(true)
+    } finally {
+      if (alive(payload)) process.kill(payload, "SIGKILL")
+    }
+  }, 20_000)
 
   it("stops a killed supervisor's collector while a detached descendant holds the output open", async () => {
     const terminal = job("bash -c 'set -m; sleep 30 & echo $! > daemon.pid'; sleep 30", { backgroundSpawn: true })
@@ -712,4 +906,108 @@ fs.createReadStream(job + "/pipe").on("data", chunk => fs.writeSync(fd, chunk))
     expect(record).toContain("exit_code: 0")
     expect(fs.readFileSync(path.join(root, "finished.txt"), "utf8")).toBe("finished")
   }, 20_000)
+})
+
+// OpenCode 2.3.0's process daemon keeps an exited command's process group reserved and SIGKILLs it
+// once 25 later commands have exited (#191). Both majors TERM that group on Stop or their timeout.
+describe("managed terminal and the launcher's process group", () => {
+  it.each(["spawn", "soft handoff"].flatMap(kind => ["/bin/sh", "/bin/dash", "/bin/bash", "/bin/zsh"].map(shell => [kind, shell] as const)))(
+    "keeps a %s job running to its real exit when the host kills the exited launcher's group under %s",
+    async (kind, shell) => {
+      if (!fs.existsSync(shell)) return
+      const terminal = job("printf front; sleep 1; printf finished", kind === "spawn" ? { backgroundSpawn: true } : { timeoutMs: 200 })
+      const launcher = launchAsGroupLeader(terminal, shell)
+      const { stdout, code } = await launcher.exited
+      expect(code).toBe(0)
+      expect(stdout).toContain(kind === "spawn" ? "__CURSOR_BACKGROUND_SHELL__" : "__CURSOR_SHELL_BACKGROUND__")
+      signalGroup(launcher.pid, "SIGKILL")
+      const record = await waitDone(terminal)
+      expect(record).toContain("frontfinished")
+      expect(record).toContain("status: succeeded")
+      expect(record).toContain("exit_code: 0")
+      expect(await waitFor(() => processesFor(terminal).length === 0)).toBe(true)
+    }, 15_000)
+
+  // The supervisor, its helpers and the command group. A launcher killed alone leaves its own
+  // deadline timer, a subshell carrying the launcher's text, in its group until the timer elapses.
+  const jobProcesses = (terminal: ManagedTerminal) =>
+    processesFor(terminal).filter(line => !line.includes("cursor_job="))
+
+  it.each([
+    ["TERMs the launcher's group", (pid: number): void => { signalGroup(pid, "SIGTERM") }],
+    ["KILLs the launcher's group", (pid: number): void => { signalGroup(pid, "SIGKILL") }],
+    ["TERMs the launcher alone", (pid: number): void => { process.kill(pid, "SIGTERM") }],
+    ["KILLs the launcher alone", (pid: number): void => { process.kill(pid, "SIGKILL") }],
+  ] as const)("stops the command when the host %s during the foreground window", async (_name, stop) => {
+    const terminal = job("sleep 30 & echo $! > child.pid; wait", { timeoutMs: 10_000 })
+    const launcher = launchAsGroupLeader(terminal)
+    try {
+      expect(await waitFor(() => fs.existsSync(path.join(root, "child.pid")))).toBe(true)
+      stop(launcher.pid)
+      await launcher.exited
+      const record = await waitDone(terminal)
+      expect(record).toContain("status: aborted")
+      expect(record).toContain("exit_code: 143")
+      expect(await waitFor(() => !alive(Number(fs.readFileSync(path.join(root, "child.pid"), "utf8"))))).toBe(true)
+      expect(await waitFor(() => jobProcesses(terminal).length === 0)).toBe(true)
+    } finally { signalGroup(launcher.pid, "SIGKILL") }
+  }, 15_000)
+
+  it("stops a command whose launcher is killed before the job is ready", async () => {
+    const terminal = job("sleep 30 & echo $! > child.pid; wait", { backgroundSpawn: true })
+    const runner = path.join(terminal.directory, "runner.sh")
+    const original = fs.readFileSync(runner, "utf8")
+    // Hold the supervisor after the command started, until it is cancelled.
+    const held = original.replace(`printf '%s\\n' "$supervisor" >"$job/ready"`,
+      `while [ "$aborted" = 0 ]; do sleep 0.01; done\nprintf '%s\\n' "$supervisor" >"$job/ready"`)
+    expect(held).not.toBe(original)
+    fs.writeFileSync(runner, held)
+    const launcher = launchAsGroupLeader(terminal)
+    try {
+      expect(await waitFor(() => fs.existsSync(path.join(root, "child.pid")))).toBe(true)
+      // KILL cannot be trapped: only the handoff pipe's end tells the supervisor.
+      process.kill(launcher.pid, "SIGKILL")
+      await launcher.exited
+      const record = await waitDone(terminal)
+      expect(record).toContain("status: aborted")
+      expect(await waitFor(() => !alive(Number(fs.readFileSync(path.join(root, "child.pid"), "utf8"))))).toBe(true)
+      expect(await waitFor(() => jobProcesses(terminal).length === 0)).toBe(true)
+    } finally { signalGroup(launcher.pid, "SIGKILL") }
+  }, 15_000)
+
+  it("records cancellation before the command group starts", async () => {
+    const terminal = job("touch should-not-run", { backgroundSpawn: true })
+    const runner = path.join(terminal.directory, "runner.sh")
+    const original = fs.readFileSync(runner, "utf8")
+    const initialized = '>"$job/header-bytes" || fail \'Could not initialize terminal record\''
+    const held = original.replace(initialized,
+      initialized + '\ntouch "$job/test-before-launch"\nwhile [ "$aborted" = 0 ]; do sleep 0.01; done')
+    expect(held).not.toBe(original)
+    fs.writeFileSync(runner, held)
+    const launcher = launchAsGroupLeader(terminal)
+    try {
+      expect(await waitFor(() => fs.existsSync(path.join(terminal.directory, "test-before-launch")))).toBe(true)
+      signalGroup(launcher.pid, "SIGKILL")
+      await launcher.exited
+      const record = await waitDone(terminal)
+      expect(record).toContain("status: aborted")
+      expect(record).toContain("exit_code: 143")
+      expect(fs.existsSync(path.join(root, "should-not-run"))).toBe(false)
+      expect(await waitFor(() => processesFor(terminal).length === 0)).toBe(true)
+    } finally { signalGroup(launcher.pid, "SIGKILL") }
+  }, 15_000)
+
+  it("leaves nothing of the job in the launcher's process group", async () => {
+    const terminal = job("sleep 1", { backgroundSpawn: true })
+    const launcher = launchAsGroupLeader(terminal)
+    await launcher.exited
+    const members = processTable().filter(entry => entry.command.includes(terminal.directory))
+    expect(members.length).toBeGreaterThan(0)
+    const groups = (await Promise.all(members.map(async entry => {
+      const ps = Bun.spawn(["ps", "-o", "pgid=", "-p", String(entry.pid)], { stdout: "pipe", stderr: "ignore" })
+      return Number((await new Response(ps.stdout).text()).trim())
+    }))).filter(group => group > 0)
+    expect(groups).not.toContain(launcher.pid)
+    expect(await waitDone(terminal)).toContain("exit_code: 0")
+  }, 15_000)
 })

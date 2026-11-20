@@ -76,8 +76,10 @@ const DISPLAY_NAME_TO_MODEL_ID: Record<string, string> = {
   "Gemini 3.7 Flash": "gemini-3.7-flash",
   "Gemini 3.8 Flash": "gemini-3.8-flash",
   "Gemini 4 Argon": "gemini-4-argon",
+  // AvailableModels serves these as gemini-4-* ids, matching the docs names.
   "Gemini 4 Carbon": "gemini-4-carbon",
   "Gemini 4 Hydrogen": "gemini-4-hydrogen",
+  "Gemini 4 Neon": "gemini-4-neon",
   "GLM 5.2": "glm-5.2",
   // Live AvailableModels serves the 5.3 pair as glm-5p3 ids, not glm-5.3.
   "GLM 5.3": "glm-5p3",
@@ -345,7 +347,7 @@ function parsePricingTables(markdown: string): ParsedRow[] {
       output,
       cacheRead,
       cacheWrite,
-      notes: notesIndex < 0 ? "" : (cells[notesIndex] ?? ""),
+      notes: cells[notesIndex] ?? "",
       // Cursor publishes some long-context rates as separate rows (`1M`, `500k`)
       // instead of only as a note on the base model.
       isExplicitLongContextRow: /\b1M\b/i.test(displayName) || /\b500k\b/i.test(displayName),

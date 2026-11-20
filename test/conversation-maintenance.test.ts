@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test"
-import { mkdir, mkdtemp, open, readFile, rename, rm, stat, symlink, truncate, utimes, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, open, opendir, readFile, rename, rm, stat, symlink, truncate, utimes, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { gzipSync } from "node:zlib"
@@ -266,6 +266,76 @@ describe("bounded conversation maintenance", () => {
     expect((await getPersistedConversation(cacheDir, sessionKey, now))?.conversationId).toBe("crash-fresh")
     await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" })
   })
+
+  it("recovers the newest quarantined snapshot when increasing retention", async () => {
+    const cacheDir = await root()
+    const filePath = conversationCacheFilePath(cacheDir, sessionKey)
+    const directory = path.join(conversationCacheDirectoryPath(cacheDir), ".gc", path.basename(filePath))
+    await mkdir(directory, { recursive: true })
+    await writeFile(path.join(directory, "first.snapshot"), "")
+    await writeFile(path.join(directory, "second.snapshot"), "")
+    // Put the older generation first in the filesystem's traversal order.
+    const entries = await opendir(directory)
+    let index = 0
+    for await (const entry of entries) {
+      const older = index++ === 0
+      await writeFile(path.join(directory, entry.name), gzipSync(protobufSnapshot(
+        older ? now - ttl - 1 : now,
+        older ? "old" : "replacement",
+      )))
+    }
+
+    process.env.CURSOR_PROVIDER_CACHE_TTL_MS = String(ttl + 1)
+    try {
+      await waitForConversationMaintenanceForTests(cacheDir, now)
+      expect((await loadPersistedConversation(cacheDir, sessionKey, now)).value?.conversationId)
+        .toBe("replacement")
+      await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
+    }
+  })
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "retries promotion of the newest quarantined snapshot after a link failure",
+    async () => {
+      const cacheDir = await root()
+      const cacheDirectory = conversationCacheDirectoryPath(cacheDir)
+      const filePath = conversationCacheFilePath(cacheDir, sessionKey)
+      await waitForConversationMaintenanceForTests(cacheDir, now)
+      const directory = path.join(cacheDirectory, ".gc", path.basename(filePath))
+      const older = path.join(directory, "older.snapshot")
+      const replacement = path.join(directory, "replacement.snapshot")
+      await mkdir(directory, { recursive: true })
+      await writeFile(older, gzipSync(protobufSnapshot(now - 1, "old")))
+      await writeFile(replacement, gzipSync(protobufSnapshot(now, "replacement")))
+
+      // Deny creation at the live name while leaving quarantine writable.
+      await chmod(cacheDirectory, 0o500)
+      try {
+        await waitForConversationMaintenanceForTests(cacheDir, now)
+        await expect(stat(filePath)).rejects.toMatchObject({ code: "ENOENT" })
+        expect((await stat(replacement)).isFile()).toBe(true)
+      } finally {
+        await chmod(cacheDirectory, 0o700)
+      }
+
+      // Promotion can succeed while removal of the quarantine link is denied.
+      await chmod(directory, 0o500)
+      try {
+        await waitForConversationMaintenanceForTests(cacheDir, now)
+        expect((await stat(filePath)).isFile()).toBe(true)
+        expect((await stat(replacement)).isFile()).toBe(true)
+      } finally {
+        await chmod(directory, 0o700)
+      }
+
+      await waitForConversationMaintenanceForTests(cacheDir, now)
+      expect((await loadPersistedConversation(cacheDir, sessionKey, now)).value?.conversationId)
+        .toBe("replacement")
+      await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" })
+    },
+  )
 
   it("does not delete a newer binding published by another process", async () => {
     const cacheDir = await root()

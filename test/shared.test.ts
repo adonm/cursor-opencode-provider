@@ -1,10 +1,11 @@
 import { describe, expect, it } from "bun:test"
-import { FORK_SNAPSHOT_CACHE_TTL_MS, resolveConversationCacheTtlMs } from "../src/shared.js"
+import { CONVERSATION_CACHE_TTL_MS, FORK_CONVERSATION_CACHE_TTL_MS, resolveConversationCacheTtlMs } from "../src/shared.js"
 
 describe("resolveConversationCacheTtlMs", () => {
   it("defaults to this fork's seven-day retention window", () => {
-    expect(resolveConversationCacheTtlMs({})).toBe(FORK_SNAPSHOT_CACHE_TTL_MS)
-    expect(FORK_SNAPSHOT_CACHE_TTL_MS).toBe(604_800_000)
+    expect(resolveConversationCacheTtlMs({})).toBe(FORK_CONVERSATION_CACHE_TTL_MS)
+    expect(FORK_CONVERSATION_CACHE_TTL_MS).toBe(604_800_000)
+    expect(CONVERSATION_CACHE_TTL_MS).toBe(86_400_000)
   })
 
   it("accepts a positive integer override", () => {
@@ -30,12 +31,12 @@ describe("resolveConversationCacheTtlMs", () => {
       "99999999999999999999",
     ]) {
       expect(resolveConversationCacheTtlMs({ CURSOR_PROVIDER_CACHE_TTL_MS: value }))
-        .toBe(FORK_SNAPSHOT_CACHE_TTL_MS)
+        .toBe(FORK_CONVERSATION_CACHE_TTL_MS)
     }
   })
 
   it("ignores an absent variable", () => {
     expect(resolveConversationCacheTtlMs({ CURSOR_PROVIDER_CACHE_TTL_MS: undefined }))
-      .toBe(FORK_SNAPSHOT_CACHE_TTL_MS)
+      .toBe(FORK_CONVERSATION_CACHE_TTL_MS)
   })
 })

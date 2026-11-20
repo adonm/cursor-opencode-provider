@@ -176,6 +176,11 @@ export const CURSOR_MODEL_COSTS = {
     "output": 7.5,
     "cache_read": 0.075
   },
+  "gemini-4-neon": {
+    "input": 3,
+    "output": 15,
+    "cache_read": 0.15
+  },
   "glm-5.2": {
     "input": 1.4,
     "output": 4.4,
@@ -446,6 +451,10 @@ export const CURSOR_MODEL_CONTEXTS = {
     "maxContextForMaxMode": 1000000
   },
   "gemini-4-hydrogen": {
+    "maxContext": 200000,
+    "maxContextForMaxMode": 1000000
+  },
+  "gemini-4-neon": {
     "maxContext": 200000,
     "maxContextForMaxMode": 1000000
   },
