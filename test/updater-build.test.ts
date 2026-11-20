@@ -348,9 +348,8 @@ function fixture(): Fixture {
     return git(seed, ["rev-parse", "HEAD"]).stdout.trim()
   }
 
-  commit("fix/short-variant-aliases", "docs/aliases.md", "aliases\n", "topic: aliases")
-  commit("feat/cache-ttl-env", "docs/ttl.md", "ttl\n", "topic: ttl")
-  commit("perf/cache-ttl-and-lean-runtime", "docs/perf.md", "perf\nlean\n", "topic: perf")
+  const topic = "perf/cache-ttl-and-lean-runtime"
+  const perfMerged = commit(topic, "docs/perf.md", "perf\nlean\n", "topic: perf")
   const forkBase = commit("fork/base", "docs/fork-base.md", "base\n", "fork: base")
   const forkDefaults = commit("fork/defaults", "docs/fork-defaults.md", "defaults\n", "fork: defaults")
 
@@ -358,16 +357,14 @@ function fixture(): Fixture {
   git(seed, ["checkout", "--quiet", "-B", "main"])
   git(seed, ["merge", "--quiet", "--no-ff", "-m", "Merge fork work", forkBase])
   git(seed, ["merge", "--quiet", "--no-ff", "-m", "Merge fork defaults", forkDefaults])
-  git(seed, ["merge", "--quiet", "--no-ff", "-m", "Merge topics", "fix/short-variant-aliases"])
-  git(seed, ["merge", "--quiet", "--no-ff", "-m", "Merge perf", "perf/cache-ttl-and-lean-runtime"])
+  git(seed, ["merge", "--quiet", "--no-ff", "-m", "Merge perf", topic])
   git(seed, ["remote", "add", "upstream", upstream])
   git(seed, ["remote", "add", "origin", origin])
   git(seed, ["push", "--quiet", "upstream", "main:refs/heads/main"])
   git(seed, ["push", "--quiet", "origin", "main:refs/heads/main"])
-  const ttlPublished = commit("feat/cache-ttl-env", "docs/ttl.md", "ttl\npublished\n", "topic: ttl published")
-  git(seed, ["push", "--quiet", "origin", "feat/cache-ttl-env:refs/heads/feat/cache-ttl-env"])
-  git(seed, ["push", "--quiet", "origin", "fix/short-variant-aliases:refs/heads/fix/short-variant-aliases"])
-  git(seed, ["push", "--quiet", "origin", "perf/cache-ttl-and-lean-runtime:refs/heads/perf/cache-ttl-and-lean-runtime"])
+  git(seed, ["checkout", "--quiet", topic])
+  commit(topic, "docs/perf-topic.md", "published\n", "topic: perf published")
+  git(seed, ["push", "--quiet", "origin", `${topic}:refs/heads/${topic}`])
   git(seed, ["push", "--quiet", "origin", "fork/base:refs/heads/fork/base"])
   git(seed, ["push", "--quiet", "origin", "fork/defaults:refs/heads/fork/defaults"])
 
@@ -378,11 +375,11 @@ function fixture(): Fixture {
   fs.copyFileSync(script("sync-upstream.sh"), path.join(work, "scripts", "sync-upstream.sh"))
   fs.mkdirSync(path.join(work, "dist"), { recursive: true })
   fs.writeFileSync(path.join(work, "dist", "marker"), "extant build\n")
-  for (const branch of ["fork/base", "fork/defaults", "perf/cache-ttl-and-lean-runtime", "fix/short-variant-aliases"]) {
+  for (const branch of ["fork/base", "fork/defaults"]) {
     git(work, ["branch", "--quiet", branch, `origin/${branch}`])
   }
-  // Local ttl topic is behind its published tip, which the sync must notice.
-  git(work, ["branch", "--quiet", "feat/cache-ttl-env", "main"])
+  // The local perf topic is behind its published tip, which the sync must notice.
+  git(work, ["branch", "--quiet", topic, perfMerged])
 
   const bin = path.join(baseDir, "bin")
   fs.mkdirSync(bin)
@@ -458,7 +455,7 @@ describe("sync-upstream.sh", () => {
     const fx = fixture()
     try {
       const upstreamTip = advanceUpstream(fx, "src/upstream.ts", "export const upstream = true\n")
-      const publishedTtl = fx.git(fx.work, ["rev-parse", "origin/feat/cache-ttl-env"]).stdout.trim()
+      const publishedPerf = fx.git(fx.work, ["rev-parse", "origin/perf/cache-ttl-and-lean-runtime"]).stdout.trim()
       const before = refs(fx, ...PUBLISH_REFS)
       const remotesBefore = remoteRefs(fx)
       const distBefore = fs.readFileSync(path.join(fx.work, "dist", "marker"), "utf8")
@@ -477,7 +474,7 @@ describe("sync-upstream.sh", () => {
       expect(fetchedMain).toBe(fx.git(fx.origin, ["rev-parse", "refs/heads/main"]).stdout.trim())
       expect(fx.git(fx.work, ["merge-base", "--is-ancestor", fetchedMain, tested!]).status).toBe(0)
       expect(fx.git(fx.work, ["merge-base", "--is-ancestor", upstreamTip, tested!]).status).toBe(0)
-      expect(fx.git(fx.work, ["merge-base", "--is-ancestor", publishedTtl, tested!]).status).toBe(0)
+      expect(fx.git(fx.work, ["merge-base", "--is-ancestor", publishedPerf, tested!]).status).toBe(0)
       expect(parents.length).toBeGreaterThanOrEqual(3)
 
       // No local publish ref, fetch cache, remote ref, file or build moved.
@@ -605,18 +602,19 @@ describe("sync-upstream.sh", () => {
   it("refuses a topic whose local history diverged from its published tip", () => {
     const fx = fixture()
     try {
-      const published = fx.git(fx.work, ["rev-parse", "origin/feat/cache-ttl-env"]).stdout.trim()
-      fx.git(fx.work, ["checkout", "--quiet", "feat/cache-ttl-env"])
-      fs.writeFileSync(path.join(fx.work, "docs", "ttl.md"), "rewritten\n")
-      fx.git(fx.work, ["add", "docs/ttl.md"])
-      fx.git(fx.work, ["commit", "--quiet", "--amend", "-m", "topic: ttl rewritten"])
+      const topic = "perf/cache-ttl-and-lean-runtime"
+      const published = fx.git(fx.work, ["rev-parse", `origin/${topic}`]).stdout.trim()
+      fx.git(fx.work, ["checkout", "--quiet", topic])
+      fs.writeFileSync(path.join(fx.work, "docs", "perf.md"), "rewritten\n")
+      fx.git(fx.work, ["add", "docs/perf.md"])
+      fx.git(fx.work, ["commit", "--quiet", "--amend", "-m", "topic: perf rewritten"])
       fx.git(fx.work, ["checkout", "--quiet", "main"])
       const before = refs(fx, ...PUBLISH_REFS)
       const result = sync(fx)
       expect(result.status).not.toBe(0)
       expect(result.stderr).toContain("diverged")
       expect(refs(fx, ...PUBLISH_REFS)).toEqual(before)
-      expect(fx.git(fx.work, ["rev-parse", "origin/feat/cache-ttl-env"]).stdout.trim()).toBe(published)
+      expect(fx.git(fx.work, ["rev-parse", `origin/${topic}`]).stdout.trim()).toBe(published)
       expect(entries(fx.tmp)).toEqual([])
     } finally {
       fs.rmSync(fx.base, { recursive: true, force: true })
@@ -650,11 +648,10 @@ describe("sync-upstream.sh", () => {
   it("reports nothing to push when main already contains every input", () => {
     const fx = fixture()
     try {
-      // Publish the topic tips into the default, as the real fork does.
+      // Publish the topic tip into the default, as the real fork does.
       const fork = path.join(fx.base, "publish-topics")
       fx.git(fx.base, ["clone", "--quiet", fx.origin, fork])
-      fx.git(fork, ["merge", "--quiet", "--no-ff", "-m", "Merge topics",
-        "origin/fix/short-variant-aliases", "origin/feat/cache-ttl-env", "origin/perf/cache-ttl-and-lean-runtime"])
+      fx.git(fork, ["merge", "--quiet", "--no-ff", "-m", "Merge perf", "origin/perf/cache-ttl-and-lean-runtime"])
       fx.git(fork, ["push", "--quiet", "origin", "HEAD:refs/heads/main"])
       const before = refs(fx, ...PUBLISH_REFS)
       const result = sync(fx)

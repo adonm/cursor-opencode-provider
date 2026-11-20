@@ -14,8 +14,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 TOPICS=(
-  fix/short-variant-aliases
-  feat/cache-ttl-env
   perf/cache-ttl-and-lean-runtime
 )
 # Private, unpublished refs: a fetch cache and the last verified candidate.
