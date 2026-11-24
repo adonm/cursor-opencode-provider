@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 # Build a verified merge candidate for `main`; never touch live refs or files.
 #
-# `origin/main` already contains `fork/base`, `fork/defaults` and every topic:
-# a normal merge preserves them, so this sync does not rebuild those branches.
-# It merges the current upstream main and the newest topic tips onto a detached
-# candidate seeded from `origin/main` (or from the local `main` when that only
-# adds commits), then verifies the candidate in a scratch worktree outside this
-# checkout. Topic histories are merged, never rebased. Fetches land in a private
-# ref namespace, so no branch and no remote-tracking ref moves before every
-# check passes, and nothing is pushed: the output names the exact tested SHA and
-# a fast-forward push for it.
+# `origin/main` already contains `fork/base`, `fork/defaults` and any listed
+# topic: a normal merge preserves them, so this sync does not rebuild those
+# branches. It merges the current upstream main (and each listed topic tip)
+# onto a detached candidate seeded from `origin/main` (or from the local `main`
+# when that only adds commits), then verifies the candidate in a scratch
+# worktree outside this checkout. Topic histories are merged, never rebased.
+# Fetches land in a private ref namespace, so no branch and no remote-tracking
+# ref moves before every check passes, and nothing is pushed: the output names
+# the exact tested SHA and a fast-forward push for it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TOPICS=(
-  perf/cache-ttl-and-lean-runtime
-)
+# No published topic branch remains: every fork change is on `main`, and each
+# former topic either merged upstream or was retired by the sync it was part of.
+# List a topic here only while a published branch must keep landing on `main`.
+TOPICS=()
 # Private, unpublished refs: a fetch cache and the last verified candidate.
 FETCH_NS=refs/sync-upstream
 CANDIDATE_REF=$FETCH_NS/candidate

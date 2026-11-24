@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test"
 import {
-  isProgressContinuationEnabled,
   isProgressOnlyAssistantText,
+  PROGRESS_CONTINUATION_ENV,
+  progressContinuationEnabled,
   progressOnlyContinuationPrompt,
   shouldContinueProgressOnlyTurn,
 } from "../src/protocol/progress-continuation.js"
@@ -64,39 +65,38 @@ describe("shouldContinueProgressOnlyTurn", () => {
     expect(shouldContinueProgressOnlyTurn({ ...ready, assistantText: "Reviewing this PR: LGTM" })).toBe(false)
   })
 
-  it("stops immediately when the caller passes continuationEnabled: false", () => {
-    expect(shouldContinueProgressOnlyTurn({ ...ready, continuationEnabled: false })).toBe(false)
-    expect(shouldContinueProgressOnlyTurn({ ...ready, continuationEnabled: true })).toBe(true)
-  })
-
-  it("treats an omitted continuationEnabled as enabled", () => {
-    expect(shouldContinueProgressOnlyTurn(ready)).toBe(true)
-  })
-})
-
-describe("isProgressContinuationEnabled", () => {
-  it("is off when the variable is unset or empty (fork default)", () => {
-    expect(isProgressContinuationEnabled({})).toBe(false)
-    expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: "" })).toBe(false)
-    expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: "   " })).toBe(false)
-  })
-
-  it("is off for explicit off values regardless of case or padding", () => {
-    for (const value of ["0", "false", "FALSE", "False", "off", "OFF", "no", "NO", " 0 ", " off "]) {
-      expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: value }), value).toBe(false)
+  it("is on by default and only the documented opt-out values turn it off", () => {
+    for (const value of [undefined, "", "  ", "1", "true", "on", "yes", "2", "disabled", "0n", "nope"]) {
+      const env = value === undefined ? {} : { [PROGRESS_CONTINUATION_ENV]: value }
+      expect(progressContinuationEnabled(env), JSON.stringify(value)).toBe(true)
+      expect(shouldContinueProgressOnlyTurn(ready, env), JSON.stringify(value)).toBe(true)
+    }
+    for (const value of ["0", "false", "off", "no", "FALSE", "Off", "NO", " 0 ", "\tfalse\n", "  oFf "]) {
+      const env = { [PROGRESS_CONTINUATION_ENV]: value }
+      expect(progressContinuationEnabled(env), JSON.stringify(value)).toBe(false)
+      expect(shouldContinueProgressOnlyTurn(ready, env), JSON.stringify(value)).toBe(false)
     }
   })
 
-  it("is on only for the explicit opt-in values", () => {
-    for (const value of ["1", "true", "TRUE", "on", "yes", " 1 ", " YES "]) {
-      expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: value }), value).toBe(true)
+  it("reads the process environment when no environment is passed", () => {
+    const saved = process.env[PROGRESS_CONTINUATION_ENV]
+    try {
+      delete process.env[PROGRESS_CONTINUATION_ENV]
+      expect(shouldContinueProgressOnlyTurn(ready)).toBe(true)
+      process.env[PROGRESS_CONTINUATION_ENV] = "off"
+      expect(shouldContinueProgressOnlyTurn(ready)).toBe(false)
+    } finally {
+      if (saved === undefined) delete process.env[PROGRESS_CONTINUATION_ENV]
+      else process.env[PROGRESS_CONTINUATION_ENV] = saved
     }
   })
 
-  it("is off for any other value", () => {
-    for (const value of ["enabled", "2", "y", "t"]) {
-      expect(isProgressContinuationEnabled({ CURSOR_PROGRESS_CONTINUATION: value }), value).toBe(false)
-    }
+  it("leaves every other refusal in place when the continuation is on", () => {
+    const on = { [PROGRESS_CONTINUATION_ENV]: "1" }
+    expect(shouldContinueProgressOnlyTurn({ ...ready, allowTools: false }, on)).toBe(false)
+    expect(shouldContinueProgressOnlyTurn({ ...ready, pendingExecs: 1 }, on)).toBe(false)
+    expect(shouldContinueProgressOnlyTurn({ ...ready, emittedHostTools: 1 }, on)).toBe(false)
+    expect(shouldContinueProgressOnlyTurn({ ...ready, continuationAttempts: 1 }, on)).toBe(false)
   })
 })
 

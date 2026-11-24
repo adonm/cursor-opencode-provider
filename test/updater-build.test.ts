@@ -15,6 +15,11 @@ afterAll(() => {
 })
 
 const root = path.resolve(import.meta.dir, "..")
+
+// The shipped script lists no topics: every fork change is already on `main`.
+// These cases seed a synthetic topic into the copied script so the topic merge
+// path stays covered without depending on a branch the fork still publishes.
+const TOPIC = "test/topic"
 const script = (name: string) => path.join(root, "scripts", name)
 
 type Run = { status: number; stdout: string; stderr: string }
@@ -348,7 +353,7 @@ function fixture(): Fixture {
     return git(seed, ["rev-parse", "HEAD"]).stdout.trim()
   }
 
-  const topic = "perf/cache-ttl-and-lean-runtime"
+  const topic = TOPIC
   const perfMerged = commit(topic, "docs/perf.md", "perf\nlean\n", "topic: perf")
   const forkBase = commit("fork/base", "docs/fork-base.md", "base\n", "fork: base")
   const forkDefaults = commit("fork/defaults", "docs/fork-defaults.md", "defaults\n", "fork: defaults")
@@ -372,7 +377,10 @@ function fixture(): Fixture {
   git(baseDir, ["clone", "--quiet", origin, work])
   git(work, ["remote", "add", "upstream", upstream])
   fs.mkdirSync(path.join(work, "scripts"), { recursive: true })
-  fs.copyFileSync(script("sync-upstream.sh"), path.join(work, "scripts", "sync-upstream.sh"))
+  const syncSource = fs.readFileSync(script("sync-upstream.sh"), "utf8")
+  const withTopic = syncSource.replace(/^TOPICS=\(\)$/m, `TOPICS=(\n  ${TOPIC}\n)`)
+  if (withTopic === syncSource) throw new Error("sync-upstream.sh no longer has an empty TOPICS array to seed")
+  fs.writeFileSync(path.join(work, "scripts", "sync-upstream.sh"), withTopic)
   fs.mkdirSync(path.join(work, "dist"), { recursive: true })
   fs.writeFileSync(path.join(work, "dist", "marker"), "extant build\n")
   for (const branch of ["fork/base", "fork/defaults"]) {
@@ -455,7 +463,7 @@ describe("sync-upstream.sh", () => {
     const fx = fixture()
     try {
       const upstreamTip = advanceUpstream(fx, "src/upstream.ts", "export const upstream = true\n")
-      const publishedPerf = fx.git(fx.work, ["rev-parse", "origin/perf/cache-ttl-and-lean-runtime"]).stdout.trim()
+      const publishedTopic = fx.git(fx.work, ["rev-parse", `origin/${TOPIC}`]).stdout.trim()
       const before = refs(fx, ...PUBLISH_REFS)
       const remotesBefore = remoteRefs(fx)
       const distBefore = fs.readFileSync(path.join(fx.work, "dist", "marker"), "utf8")
@@ -474,7 +482,7 @@ describe("sync-upstream.sh", () => {
       expect(fetchedMain).toBe(fx.git(fx.origin, ["rev-parse", "refs/heads/main"]).stdout.trim())
       expect(fx.git(fx.work, ["merge-base", "--is-ancestor", fetchedMain, tested!]).status).toBe(0)
       expect(fx.git(fx.work, ["merge-base", "--is-ancestor", upstreamTip, tested!]).status).toBe(0)
-      expect(fx.git(fx.work, ["merge-base", "--is-ancestor", publishedPerf, tested!]).status).toBe(0)
+      expect(fx.git(fx.work, ["merge-base", "--is-ancestor", publishedTopic, tested!]).status).toBe(0)
       expect(parents.length).toBeGreaterThanOrEqual(3)
 
       // No local publish ref, fetch cache, remote ref, file or build moved.
@@ -493,7 +501,7 @@ describe("sync-upstream.sh", () => {
       expect(result.stdout.match(/git push/g)).toHaveLength(1)
       expect(result.stdout).not.toContain("refs/heads/fix/")
       expect(result.stdout).not.toContain("refs/heads/feat/")
-      expect(result.stdout).not.toContain("refs/heads/perf/")
+      expect(result.stdout).not.toContain(`refs/heads/${TOPIC}`)
 
       // Every check ran in the scratch worktree, outside this checkout, and
       // every one of them ran against the exact candidate that was printed.
@@ -602,7 +610,7 @@ describe("sync-upstream.sh", () => {
   it("refuses a topic whose local history diverged from its published tip", () => {
     const fx = fixture()
     try {
-      const topic = "perf/cache-ttl-and-lean-runtime"
+      const topic = TOPIC
       const published = fx.git(fx.work, ["rev-parse", `origin/${topic}`]).stdout.trim()
       fx.git(fx.work, ["checkout", "--quiet", topic])
       fs.writeFileSync(path.join(fx.work, "docs", "perf.md"), "rewritten\n")
@@ -651,7 +659,7 @@ describe("sync-upstream.sh", () => {
       // Publish the topic tip into the default, as the real fork does.
       const fork = path.join(fx.base, "publish-topics")
       fx.git(fx.base, ["clone", "--quiet", fx.origin, fork])
-      fx.git(fork, ["merge", "--quiet", "--no-ff", "-m", "Merge perf", "origin/perf/cache-ttl-and-lean-runtime"])
+      fx.git(fork, ["merge", "--quiet", "--no-ff", "-m", "Merge topic", `origin/${TOPIC}`])
       fx.git(fork, ["push", "--quiet", "origin", "HEAD:refs/heads/main"])
       const before = refs(fx, ...PUBLISH_REFS)
       const result = sync(fx)

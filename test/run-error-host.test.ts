@@ -421,9 +421,6 @@ describe("checkpoint eligibility across host results", () => {
   ] as const) {
     it(`recovers a post-result drop only from represented completed work (${scenario})`, async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-result-history-"))
-      // The fork ships progress continuation off; this scenario drives it.
-      const continuation = scenario === "followup-before-result"
-      if (continuation) process.env.CURSOR_PROGRESS_CONTINUATION = "1"
       type RunRequest = { conversation_id: string; action: { resume_action?: unknown; user_message_action?: { user_message: { text: string } } } }
       const requests: RunRequest[] = []
       const delivered: number[] = []
@@ -665,7 +662,6 @@ describe("checkpoint eligibility across host results", () => {
           expect(softDenied).toEqual(scenario === "soft-denied-background" || scenario === "soft-denied-fetch" ? [70] : [])
         }
       } finally {
-        if (continuation) delete process.env.CURSOR_PROGRESS_CONTINUATION
         sessionManager.dispose()
         await settleRunSavesForTests()
         setHostCacheDirOverride(undefined)
@@ -960,8 +956,6 @@ describe("follow-up checkpoint arrival", () => {
     }
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cursor-followup-checkpoint-"))
     cacheHttp2SessionForTests(ORIGIN, client)
-    // The fork ships progress continuation off; this case covers the enabled path.
-    process.env.CURSOR_PROGRESS_CONTINUATION = "1"
     try {
       const key = "ses_progress_early_checkpoint"
       const model = createCursor({
@@ -1002,7 +996,6 @@ describe("follow-up checkpoint arrival", () => {
         conversation_id: requests[0]!.conversation_id })
       expect(parts.some(part => part.type === "text-delta" && part.delta === "Finished.")).toBe(true)
     } finally {
-      delete process.env.CURSOR_PROGRESS_CONTINUATION
       fs.rmSync(root, { recursive: true, force: true })
     }
   }, 30_000)

@@ -1,5 +1,6 @@
 import { MODEL_CACHE_FILE, MODEL_CACHE_SCHEMA_VERSION, MODEL_CACHE_TTL_MS } from "./shared.js"
 import { unaryAvailableModels } from "./transport/connect.js"
+import { CursorProtocolError } from "./errors.js"
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises"
 import path from "node:path"
 
@@ -648,14 +649,6 @@ export async function fetchModels(
 
 const refreshesByDirectory = new Map<string, Promise<ModelCache>>()
 
-/**
- * The cache entry this refresh wrote, models plus the exact `fetchedAt` that
- * went to disk.
- *
- * Callers that record catalog freshness must take this snapshot, not a later
- * `readCache`: another Location or process can write a different account's
- * catalog in between, so a second read is not the catalog this fetch produced.
- */
 async function refreshModelCacheSnapshot(
   cacheDir: string,
   fetcher: () => Promise<ModelInfo[]>,
@@ -665,14 +658,18 @@ async function refreshModelCacheSnapshot(
   const existing = refreshesByDirectory.get(key)
   if (existing) {
     if (!options.forceAfterInflight) return existing
-    // An account switch must not join a background refresh authenticated as
-    // the previous account. Wait for that write to finish, then run this
-    // caller's fetch so its account inventory is authoritative on disk.
+    // An authoritative fetch must not join a refresh authenticated as another
+    // account. Wait for that write before fetching this account's catalog.
     await existing.catch(() => {})
     return refreshModelCacheSnapshot(cacheDir, fetcher, options)
   }
   const refresh = (async () => {
     const models = await fetcher()
+    if (models.length === 0) {
+      throw new CursorProtocolError("Cursor returned an empty model catalog", {
+        code: "CURSOR_EMPTY_MODEL_CATALOG",
+      })
+    }
     const snapshot: ModelCache = {
       models,
       fetchedAt: Date.now(),
@@ -701,14 +698,7 @@ export type DiscoverModelsOptions = {
   baseURL?: string
   headers?: Record<string, string>
   timeoutMs?: number
-  /**
-   * Bypass even a fresh cache and require an authoritative response.
-   *
-   * Model availability is account-scoped. Callers use this after a
-   * credential switch so a fresh cache produced by the previous account is
-   * never rebound to the new connection. A forced refresh rejects on fetch
-   * failure; the caller can keep the already-published inventory unchanged.
-   */
+  /** Require a response for this credential; never fall back to the shared cache. */
   forceRefresh?: boolean
 }
 
@@ -721,15 +711,8 @@ export async function discoverModels(
 }
 
 /**
- * Discovery that also reports which cache entry the result came from.
- *
- * A caller that tracks catalog freshness must not re-read the cache afterwards:
- * a concurrent Location or process can replace it with a different account's
- * catalog, which would pair these models with the wrong `fetchedAt` (and, on a
- * forced account refresh, discard the authoritative result it just fetched).
- * The returned snapshot is the fetched catalog and the timestamp written with
- * it, or the exact cache entry read here — including the stale entry served
- * when a non-forced fetch fails.
+ * Return the snapshot this call read or wrote, including its original age
+ * when falling back to stale data. A later read may see another writer's catalog.
  */
 export async function discoverModelCache(
   token: string,
@@ -737,7 +720,6 @@ export async function discoverModelCache(
   options: DiscoverModelsOptions = {},
 ): Promise<ModelCache> {
   const { forceRefresh = false, ...fetchOptions } = options
-  const cached = await readCache(cacheDir)
   const refresh = () =>
     refreshModelCacheSnapshot(
       cacheDir,
@@ -745,8 +727,13 @@ export async function discoverModelCache(
       { forceAfterInflight: forceRefresh },
     )
 
+  if (forceRefresh) return refresh()
+  const cached = await readCache(cacheDir)
+  // Older versions could persist an empty response with a fresh timestamp.
+  if (!cached?.models.length) return refresh()
+
   // Cache is fresh → return it; refresh in background
-  if (!forceRefresh && cached && isCacheFresh(cached)) {
+  if (isCacheFresh(cached)) {
     // Background refresh (fire and forget)
     void refresh()
       .catch(() => {
@@ -756,15 +743,9 @@ export async function discoverModelCache(
   }
 
   // Cache exists but expired → try fetch, serve stale on failure
-  if (cached) {
-    try {
-      return await refresh()
-    } catch (error) {
-      if (forceRefresh) throw error
-      return cached
-    }
+  try {
+    return await refresh()
+  } catch {
+    return cached
   }
-
-  // No cache → must fetch
-  return refresh()
 }

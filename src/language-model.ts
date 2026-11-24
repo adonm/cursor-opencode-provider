@@ -138,7 +138,6 @@ import { createManagedTerminal } from "./terminal-runner.js"
 import { cursorExecVariantByRequestField, describeCursorExecVariant, isExecRequestWithoutNewCall } from "./protocol/exec-variants.js"
 import { appendCheckpointUserGrounding, appendWorkspaceRootGrounding } from "./protocol/workspace-grounding.js"
 import {
-  isProgressContinuationEnabled,
   progressOnlyContinuationPrompt,
   shouldContinueProgressOnlyTurn,
 } from "./protocol/progress-continuation.js"
@@ -6375,7 +6374,6 @@ export async function pump(
              emittedHostTools,
              continuationAttempts: progressContinuationAttempts,
              pendingExecs: session.pending.size,
-             continuationEnabled: isProgressContinuationEnabled(),
            })
       ) {
         progressContinuationAttempts += 1
@@ -8287,9 +8285,11 @@ export function buildOpenCodeInteractionGuidance(
     "When using CallDynamicTool, write the discovered `namespace` and `toolName` FIRST, before `arguments`, on every invocation including each parallel call. All three are required outer fields. The discovered inputSchema describes only the inner arguments object; it is not the whole call. Check the outer identity before submitting a long command or script. Only supplied top-level functions take their schema's argument object directly; dynamically advertised Cursor tools need the same CallDynamicTool envelope as other dynamic tools.",
     "Use each tool's current input schema and supply every required argument. Never call a tool with only arguments belonging to a different tool.",
     "Emit the actual tool call and wait for its result; never merely claim or summarize that a tool was used.",
+    "A progress update such as \"Checking…\", \"Inspecting…\", or \"Let me look…\" is not a final answer.",
     planEntryHandoff
-      ? "After an approved SwitchMode into plan, report that the switch was accepted and the next host turn will plan, then end this turn without tools. This completed handoff takes precedence over progress/tool instructions. In all other cases, after progress narration call a listed tool or provide the complete answer before finishing; never end a turn with progress narration alone."
-      : "After progress narration, call a listed tool or provide the complete user-facing answer before finishing; never end a turn with progress narration alone.",
+      ? "After an approved SwitchMode into plan, report that the switch was accepted and the next host turn will plan, then end this turn without tools. This completed handoff takes precedence over progress/tool instructions. In all other cases, after progress narration call a listed tool or provide the complete answer before finishing."
+      : "After progress narration, call a listed tool in the same turn; if no tool is needed, provide the complete user-facing answer before finishing.",
+    "Never end a turn with progress narration alone; a completed mode handoff is a valid end of turn.",
   ].join("\n")
 }
 

@@ -1,6 +1,6 @@
 # OpenCode 2.x lessons
 
-[Index](../lessons.md) · [General](opencode.md) · [1.x](opencode-1.md)
+[Index](../lessons.md) · [General](opencode.md) · [1.x](opencode-1.md) · [Pricing](pricing.md)
 
 Operator setup: [OpenCode 2.x](../../docs/opencode-2.md).
 
@@ -70,34 +70,29 @@ Operator setup: [OpenCode 2.x](../../docs/opencode-2.md).
   `test/errors.test.ts`, `test/run-error-host.test.ts`).
 - **A new plugin header does not prove a new SDK.** Pin the intended binary,
   isolate config, use the 2.1.4 `plugins` configuration key and a local wrapper
-  directory with an index entry, set the provider entry before daemon start,
-  and restart after rebuilding ([local setup](../../docs/opencode-2.md#from-a-local-clone-cursor_opencode2_dev_entry)).
+  directory with an index entry, check the `package` that `provider.list`
+  publishes, and restart after rebuilding ([local setup](../../docs/opencode-2.md#from-a-local-clone)).
+  A local build published the npm package unless an entry was exported before
+  daemon start, so any path that skipped our `sdk` hook ran the published
+  bundle against the local plugin (#185). Publish a verified local build's own
+  `dist/index.js` and keep registry installs on the package name. Find the
+  manifest from the loaded catalog. Starting from a symlinked SDK entry can
+  verify a different build's manifest. Check conditional exports in their
+  declared order so an earlier default cannot be mistaken for a later import
+  (`resolveAiSdkPackageSpec`, `test/opencode2-aisdk-package.test.ts`).
 
 ## Catalog and permissions
 
-- **A loaded catalog is not a fresh one.** `ensureModels` returned as soon as
-  `modelsLoaded` was set, so the 24 h TTL was only ever read at location setup:
-  a long-lived host kept serving the models it started with, and the usual
-  remedy (write the cache, then reload the location) interrupted running
-  agents. Check the persisted `fetchedAt` of the published catalog on existing
-  activity (the `ctx.event` subscription already rechecked) and publish through
-  `provider.reload()` without restarting the location. Never restamp a cache
-  read at setup — that would reset a 23 h-old catalog's clock — and keep the
-  last good catalog published when the fetch fails or returns empty. Bound
-  retries after a failed recheck so event-heavy sessions cannot hammer
-  discovery, and let a credential switch clear that state
-  (`test/plugin-opencode2.test.ts`, stale catalog recheck while the location
-  stays up).
-  Keep models and their timestamp in one snapshot: `discoverModelCache` returns
-  the entry a refresh wrote (or the stale entry it read), and a later
-  `readCache` is not that entry. Another Location or process shares the file,
-  so re-sampling it can pair these models with the wrong account's catalog and
-  `fetchedAt` — defeating a forced account refresh that had just fetched the
-  authoritative list (`discoverModelCache`, `test/models.test.ts`). The
-  readiness deadline rejects outside the discovery loop, so count failures at
-  the attempt boundary too; otherwise an expired catalog whose recheck timed
-  out opens a new request on the very next activity
-  (`test/plugin-opencode2.test.ts`, readiness timeout while rechecking).
+- **A loaded catalog is not a fresh one.** The `modelsLoaded` latch let
+  long-lived Locations serve the same models past the cache's 24-hour TTL
+  (#194). Recheck the published snapshot's original `fetchedAt` on activity
+  and publish through `provider.reload()`. Don't reread the shared cache to
+  timestamp the result: another credential may have written to it since.
+  The turn context hook also checks expiry when the event stream is unavailable.
+  Reject empty discovery before replacing the disk cache. Retain the last good
+  catalog and back off failures, including readiness timeouts outside the
+  discovery loop. Credential switches clear the backoff
+  (`discoverModelCache`, `test/models.test.ts`, and the stale catalog recheck tests).
 - **Name aliases from the catalog's own tier.** The smallest explicit context
   can differ from the declared base. Count omitted context with that base
   when checking ambiguity. Conflicting effort fields have no alias, regardless

@@ -55,8 +55,9 @@ process.env.CURSOR_CLIENT_VERSION = "cli-test"
 delete process.env.CURSOR_PROVIDER_CACHE_TTL_MS
 
 /**
- * Progress-continuation tests exercise the fork's opt-in gate explicitly.
- * Clear any inherited setting so default-off cases run without it.
+ * Progress-only continuation tests assert the default follow-up Run unless they
+ * set the opt-out themselves. An operator's `CURSOR_PROGRESS_CONTINUATION=0`
+ * must not turn it off for them.
  */
 delete process.env.CURSOR_PROGRESS_CONTINUATION
 
